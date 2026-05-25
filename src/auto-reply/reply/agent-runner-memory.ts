@@ -265,6 +265,25 @@ function resolveFollowupContextConfigProvider(params: {
   });
 }
 
+function resolvePreflightCompactionRunTarget(params: {
+  followupRun: FollowupRun;
+  sessionEntry?: SessionEntry;
+}): { provider: string; model: string; authProfileId?: string; agentHarnessId?: string } {
+  const run = params.followupRun.run;
+  const matchingSessionEntry =
+    params.sessionEntry?.sessionId === run.sessionId ? params.sessionEntry : undefined;
+  const authProfileId =
+    normalizeOptionalString(matchingSessionEntry?.authProfileOverride) ??
+    normalizeOptionalString(run.authProfileId);
+  const agentHarnessId = normalizeOptionalString(matchingSessionEntry?.agentHarnessId);
+  return {
+    provider: normalizeOptionalString(matchingSessionEntry?.modelProvider) ?? run.provider,
+    model: normalizeOptionalString(matchingSessionEntry?.model) ?? run.model,
+    ...(authProfileId ? { authProfileId } : {}),
+    ...(agentHarnessId ? { agentHarnessId } : {}),
+  };
+}
+
 function resolveVisibleMemoryFlushErrorPayloads(payloads?: ReplyPayload[]): ReplyPayload[] {
   return (payloads ?? []).filter(
     (payload) => payload.isError === true && isRenderablePayload(payload),
@@ -735,6 +754,10 @@ export async function runPreflightCompactionIfNeeded(params: {
     params.sessionKey ?? params.followupRun.run.sessionKey,
     { storePath: params.storePath },
   );
+  const compactionRunTarget = resolvePreflightCompactionRunTarget({
+    followupRun: params.followupRun,
+    sessionEntry: entry,
+  });
   const result = await memoryDeps.compactEmbeddedPiSession({
     sessionId: entry.sessionId,
     sessionKey: params.sessionKey,
@@ -753,10 +776,14 @@ export async function runPreflightCompactionIfNeeded(params: {
     agentDir: params.followupRun.run.agentDir,
     config: params.cfg,
     skillsSnapshot: entry.skillsSnapshot ?? params.followupRun.run.skillsSnapshot,
-    provider: params.followupRun.run.provider,
-    model: params.followupRun.run.model,
-    agentHarnessId:
-      entry.sessionId === params.followupRun.run.sessionId ? entry.agentHarnessId : undefined,
+    provider: compactionRunTarget.provider,
+    model: compactionRunTarget.model,
+    ...(compactionRunTarget.authProfileId
+      ? { authProfileId: compactionRunTarget.authProfileId }
+      : {}),
+    ...(compactionRunTarget.agentHarnessId
+      ? { agentHarnessId: compactionRunTarget.agentHarnessId }
+      : {}),
     thinkLevel: params.followupRun.run.thinkLevel,
     bashElevated: params.followupRun.run.bashElevated,
     trigger: "budget",

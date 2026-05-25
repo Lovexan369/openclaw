@@ -413,6 +413,82 @@ describe("runReplyAgent heartbeat followup guard", () => {
   });
 });
 
+describe("runReplyAgent preflight compaction", () => {
+  it("keeps Codex-backed Slack sessions on the persisted Codex compaction route", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "openclaw-codex-preflight-"));
+    try {
+      const sessionFile = join(dir, "session.jsonl");
+      const storePath = join(dir, "sessions.json");
+      await writeFile(
+        sessionFile,
+        `${JSON.stringify({ message: { role: "user", content: "hi" } })}\n`,
+        "utf8",
+      );
+      const sessionEntry: SessionEntry = {
+        sessionId: "session",
+        sessionFile,
+        updatedAt: Date.now(),
+        totalTokens: 250_000,
+        totalTokensFresh: true,
+        modelProvider: "codex",
+        model: "gpt-5.5",
+        agentHarnessId: "codex",
+      };
+      const sessionStore = { main: sessionEntry };
+      await writeFile(storePath, JSON.stringify(sessionStore), "utf8");
+      state.compactEmbeddedPiSessionMock.mockResolvedValueOnce({
+        ok: true,
+        compacted: true,
+        result: { tokensAfter: 42 },
+      });
+
+      const { run } = createMinimalRun({
+        sessionEntry,
+        sessionStore,
+        sessionKey: "main",
+        storePath,
+        sessionCtx: { Provider: "slack" },
+        runOverrides: {
+          provider: "openai",
+          model: "gpt-5.5",
+          sessionId: "session",
+          sessionFile,
+          messageProvider: "slack",
+          config: {
+            models: {
+              providers: {
+                openai: { models: [{ id: "gpt-5.5", contextWindow: 100_000 }] },
+                codex: { models: [{ id: "gpt-5.5", contextWindow: 100_000 }] },
+              },
+            },
+            agents: { defaults: { compaction: { memoryFlush: {} } } },
+          },
+        },
+      });
+
+      await run();
+
+      expect(state.compactEmbeddedPiSessionMock).toHaveBeenCalledTimes(1);
+      const compactCall = requireRecord(
+        mockCallArgs(state.compactEmbeddedPiSessionMock, "preflight compaction")[0],
+        "preflight compaction call",
+      );
+      expect(compactCall.provider).toBe("codex");
+      expect(compactCall.model).toBe("gpt-5.5");
+      expect(compactCall.agentHarnessId).toBe("codex");
+
+      const runCall = requireRecord(
+        mockCallArgs(state.runEmbeddedPiAgentMock, "run embedded pi agent")[0],
+        "embedded run call",
+      );
+      expect(runCall.provider).toBe("openai");
+      expect(runCall.model).toBe("gpt-5.5");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("runReplyAgent pending final delivery capture", () => {
   async function createSessionStoreFile(entry: SessionEntry) {
     const dir = await mkdtemp(join(tmpdir(), "openclaw-agent-runner-pending-"));
