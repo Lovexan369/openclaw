@@ -12,6 +12,7 @@ import type {
 import { normalizeOptionalLowercaseString } from "../shared/string-coerce.js";
 import { normalizeTrimmedStringList } from "../shared/string-normalization.js";
 import { asBoolean } from "../utils/boolean.js";
+import { stripInlineDirectiveTagsForDelivery } from "../utils/directive-tags.js";
 
 export type {
   ChannelDeliveryStreamingConfig,
@@ -275,6 +276,7 @@ export type ChannelProgressDraftLine = {
   status?: string;
   toolName?: string;
   prefix?: boolean;
+  format?: boolean;
 };
 
 function compactStrings(values: readonly (string | undefined | null)[]): string[] {
@@ -511,6 +513,70 @@ export function buildChannelProgressDraftLine(
     }
   }
   return undefined;
+}
+
+export function normalizeChannelCommentaryProgressText(text: string): string {
+  const cleaned = stripInlineDirectiveTagsForDelivery(text).text.trim();
+  if (!cleaned || isSilentChannelCommentaryProgressText(cleaned)) {
+    return "";
+  }
+  return cleaned
+    .split(/\r?\n/u)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .map((line) => `_${line}_`)
+    .join("\n");
+}
+
+export function resolveChannelCommentaryProgressLineId(params: {
+  text?: string;
+  itemId?: string;
+}): string | undefined {
+  const itemId = params.itemId?.trim();
+  if (itemId) {
+    return `commentary:${itemId}`;
+  }
+  const normalized = normalizeChannelCommentaryProgressText(params.text ?? "");
+  return normalized ? `commentary:${normalized}` : undefined;
+}
+
+export function buildChannelCommentaryProgressDraftLine(params: {
+  text?: string;
+  itemId?: string;
+}): ChannelProgressDraftLine | undefined {
+  const normalized = normalizeChannelCommentaryProgressText(params.text ?? "");
+  const itemId = params.itemId?.trim();
+  const lineId = itemId ? `commentary:${itemId}` : normalized ? `commentary:${normalized}` : "";
+  if (!normalized || !lineId) {
+    return undefined;
+  }
+  return {
+    id: lineId,
+    kind: "item",
+    text: normalized,
+    label: "Commentary",
+    prefix: false,
+    format: false,
+  };
+}
+
+export function removeChannelProgressDraftLine<TLine extends string | ChannelProgressDraftLine>(
+  lines: TLine[],
+  lineId: string,
+): TLine[] {
+  const normalizedLineId = lineId.trim();
+  if (!normalizedLineId) {
+    return lines;
+  }
+  const nextLines = lines.filter(
+    (line) => typeof line !== "object" || line.id?.trim() !== normalizedLineId,
+  );
+  return nextLines.length === lines.length ? lines : nextLines;
+}
+
+function isSilentChannelCommentaryProgressText(text: string): boolean {
+  const normalized = text.replace(/^[\s*_`~]+|[\s*_`~]+$/gu, "").trim();
+  return /^NO_REPLY$/iu.test(normalized);
 }
 
 export function createChannelProgressDraftGate(params: {
@@ -989,14 +1055,17 @@ export function formatChannelProgressDraftText(params: {
           ? line
           : getProgressDraftLineText(line);
       const text = compactChannelProgressDraftLine(rawText, maxLineChars);
-      return text ? { text, isLabelLine, prefix } : undefined;
+      const format =
+        !isLabelLine && typeof line === "object" && line !== null ? line.format !== false : true;
+      return text ? { text, isLabelLine, prefix, format } : undefined;
     })
-    .filter((line): line is { text: string; isLabelLine: boolean; prefix: boolean } =>
-      Boolean(line),
+    .filter(
+      (line): line is { text: string; isLabelLine: boolean; prefix: boolean; format: boolean } =>
+        Boolean(line),
     )
     .slice(-maxLines)
-    .map(({ text, isLabelLine, prefix }) => {
-      const formatted = isLabelLine ? text : formatLine(text);
+    .map(({ text, isLabelLine, prefix, format }) => {
+      const formatted = isLabelLine || !format ? text : formatLine(text);
       return {
         text:
           !isLabelLine && prefix && shouldPrefixProgressLine(text)

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  buildChannelCommentaryProgressDraftLine,
   buildChannelProgressDraftLine,
   createChannelProgressDraftGate,
   DEFAULT_PROGRESS_DRAFT_LABELS,
@@ -10,6 +11,8 @@ import {
   isChannelProgressDraftWorkToolName,
   isPotentialTruncatedFinal,
   mergeChannelProgressDraftLine,
+  removeChannelProgressDraftLine,
+  resolveChannelCommentaryProgressLineId,
   resolveChannelPreviewStreamMode,
   resolveChannelProgressDraftMaxLineChars,
   resolveChannelProgressDraftLabel,
@@ -115,6 +118,39 @@ describe("channel-streaming", () => {
         streaming: { mode: "progress" },
       }),
     ).toBe(false);
+  });
+
+  it("builds transient commentary progress lines", () => {
+    const line = buildChannelCommentaryProgressDraftLine({
+      itemId: "preamble-1",
+      text: "[[reply_to_current]] Checking\n  source data.",
+    });
+
+    expect(line).toEqual({
+      id: "commentary:preamble-1",
+      kind: "item",
+      text: "_Checking_\n_source data._",
+      label: "Commentary",
+      prefix: false,
+      format: false,
+    });
+    expect(
+      formatChannelProgressDraftText({
+        entry: { streaming: { progress: { label: false } } },
+        lines: [line!],
+        formatLine: (text) => `\`${text}\``,
+      }),
+    ).toBe("_Checking_ _source data._");
+    expect(
+      buildChannelCommentaryProgressDraftLine({
+        itemId: "preamble-1",
+        text: "**NO_REPLY",
+      }),
+    ).toBeUndefined();
+    expect(resolveChannelCommentaryProgressLineId({ itemId: "preamble-1" })).toBe(
+      "commentary:preamble-1",
+    );
+    expect(removeChannelProgressDraftLine([line!], "commentary:preamble-1")).toEqual([]);
   });
 
   it("falls back to legacy flat fields when the canonical object is absent", () => {
