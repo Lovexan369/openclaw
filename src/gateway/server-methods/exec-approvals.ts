@@ -163,7 +163,6 @@ export const execApprovalsHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Gateway protocol validation accepts the wire shape; the normalizer sanitizes enum-like policy fields.
     const normalized = normalizeExecApprovals(incoming as ExecApprovalsFile);
     const next = mergeExecApprovalsSocketDefaults({ normalized, current: snapshot.file });
     saveExecApprovals(next);

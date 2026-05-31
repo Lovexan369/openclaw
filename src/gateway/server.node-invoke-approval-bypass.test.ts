@@ -1,4 +1,3 @@
-// oxlint-disable typescript/no-unsafe-type-assertion -- Tests inspect mocked node invoke payloads whose runtime shapes are part of the assertions.
 import crypto from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { WebSocket } from "ws";

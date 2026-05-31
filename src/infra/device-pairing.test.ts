@@ -1,4 +1,3 @@
-// oxlint-disable typescript/no-unsafe-type-assertion -- Tests inspect device-pairing fixtures whose runtime shapes are part of the assertions.
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { PAIRING_SETUP_BOOTSTRAP_PROFILE } from "../shared/device-bootstrap-profile.js";

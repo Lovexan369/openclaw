@@ -1,4 +1,3 @@
-// oxlint-disable typescript/no-unsafe-type-assertion -- Tests inspect mocked role/allowlist payloads whose runtime shapes are part of the assertions.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";

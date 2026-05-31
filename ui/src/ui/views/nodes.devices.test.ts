@@ -247,7 +247,6 @@ describe("nodes exec approvals rendering", () => {
     const container = renderNodesContainer({
       execApprovalsTarget: "node",
       execApprovalsTargetNodeId: "node-1",
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- This deliberately models an unvalidated node payload.
       execApprovalsSnapshot: snapshot as unknown as NodesProps["execApprovalsSnapshot"],
     });
 

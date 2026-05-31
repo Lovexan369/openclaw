@@ -1,5 +1,4 @@
 // @vitest-environment node
-// oxlint-disable typescript/no-unsafe-type-assertion -- Controller tests use a partial browser client mock.
 import { describe, expect, it, vi } from "vitest";
 import type { GatewayBrowserClient } from "../gateway.ts";
 import {
