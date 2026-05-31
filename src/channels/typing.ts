@@ -154,8 +154,17 @@ export function createTypingCallbacks(params: CreateTypingCallbacksParams): Typi
     void stop().catch((err) => (params.onStopError ?? params.onStartError)(err));
   };
 
+  const hasPendingStart = () => {
+    for (const start of pendingStarts) {
+      if (start.pending) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   const fireStop = () => {
-    if ([...pendingStarts].some((start) => start.pending)) {
+    if (hasPendingStart()) {
       stopRequestedDuringPendingStart = true;
     }
     closed = true;
