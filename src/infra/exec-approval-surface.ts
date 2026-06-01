@@ -49,7 +49,12 @@ export function resolveExecApprovalInitiatingSurfaceState(params: {
   return resolveApprovalInitiatingSurfaceState({ ...params, approvalKind: "exec" });
 }
 
-/** Resolve whether the initiating channel can collect a native approval for this approval kind. */
+/**
+ * Resolves whether the initiating channel can collect a native approval for this approval kind.
+ *
+ * Built-in UI surfaces are always enabled. Channel plugins may override availability through their
+ * approval capability; deliverable chat channels without an override fall back to message replies.
+ */
 export function resolveApprovalInitiatingSurfaceState(params: {
   channel?: string | null;
   accountId?: string | null;
@@ -90,7 +95,12 @@ export function resolveApprovalInitiatingSurfaceState(params: {
   return { kind: "unsupported", channel, channelLabel, accountId };
 }
 
-/** Return whether a channel has native exec approval support or is a built-in UI surface. */
+/**
+ * Returns whether a channel has native exec approval support or is a built-in UI surface.
+ *
+ * This is used for fallback copy only; full request routing still goes through the initiating
+ * surface state resolver so account/config-specific disabled states can be reported.
+ */
 export function supportsNativeExecApprovalClient(channel?: string | null): boolean {
   const normalized = normalizeMessageChannel(channel);
   if (!normalized || normalized === INTERNAL_MESSAGE_CHANNEL || normalized === "tui") {
@@ -99,7 +109,12 @@ export function supportsNativeExecApprovalClient(channel?: string | null): boole
   return hasNativeExecApprovalCapability(normalized);
 }
 
-/** List configured/native approval-capable channel labels for fallback guidance. */
+/**
+ * Lists native approval-capable channel labels for fallback guidance.
+ *
+ * The initiating channel can be excluded so unavailable-channel notices do not recommend the same
+ * client that just failed availability checks.
+ */
 export function listNativeExecApprovalClientLabels(params?: {
   excludeChannel?: string | null;
 }): string[] {
@@ -112,7 +127,11 @@ export function listNativeExecApprovalClientLabels(params?: {
     .toSorted((a, b) => a.localeCompare(b));
 }
 
-/** Ask the channel plugin for setup guidance for native exec approvals, when available. */
+/**
+ * Asks the channel plugin for setup guidance for native exec approvals, when available.
+ *
+ * Built-in UI surfaces return null because they do not need per-channel setup instructions.
+ */
 export function describeNativeExecApprovalClientSetup(params: {
   channel?: string | null;
   channelLabel?: string | null;
