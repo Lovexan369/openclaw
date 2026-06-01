@@ -204,10 +204,45 @@ export type PluginRuntimeCore = {
     ensureAgentWorkspace: typeof import("../../agents/workspace.js").ensureAgentWorkspace;
     session: {
       resolveStorePath: typeof import("../../config/sessions/paths.js").resolveStorePath;
-      getSessionEntry: typeof import("../../config/sessions/store.js").getSessionEntry;
-      listSessionEntries: typeof import("../../config/sessions/store.js").listSessionEntries;
+      getSessionEntry: (params: {
+        agentId?: string;
+        env?: NodeJS.ProcessEnv;
+        hydrateSkillPromptRefs?: boolean;
+        sessionKey: string;
+        storePath?: string;
+      }) => import("../../config/sessions/types.js").SessionEntry | undefined;
+      listSessionEntries: (
+        params?: Partial<{
+          agentId: string;
+          env: NodeJS.ProcessEnv;
+          hydrateSkillPromptRefs: boolean;
+          storePath: string;
+        }>,
+      ) => Array<{
+        sessionKey: string;
+        entry: import("../../config/sessions/types.js").SessionEntry;
+      }>;
       patchSessionEntry: typeof import("../../config/sessions/store.js").patchSessionEntry;
-      upsertSessionEntry: typeof import("../../config/sessions/store.js").upsertSessionEntry;
+      upsertSessionEntry: (params: {
+        agentId?: string;
+        env?: NodeJS.ProcessEnv;
+        hydrateSkillPromptRefs?: boolean;
+        sessionKey: string;
+        storePath?: string;
+        entry: import("../../config/sessions/types.js").SessionEntry;
+      }) => Promise<void>;
+      updateSessionStoreEntry: (params: {
+        storePath: string;
+        sessionKey: string;
+        update: (
+          entry: import("../../config/sessions/types.js").SessionEntry,
+        ) =>
+          | Promise<Partial<import("../../config/sessions/types.js").SessionEntry> | null>
+          | Partial<import("../../config/sessions/types.js").SessionEntry>
+          | null;
+        skipMaintenance?: boolean;
+        takeCacheOwnership?: boolean;
+      }) => Promise<import("../../config/sessions/types.js").SessionEntry | null>;
       /**
        * @deprecated Use getSessionEntry/listSessionEntries for reads and
        * patchSessionEntry/upsertSessionEntry for writes. This keeps the legacy
@@ -216,7 +251,6 @@ export type PluginRuntimeCore = {
       loadSessionStore: typeof import("../../config/sessions/store-load.js").loadSessionStore;
       saveSessionStore: import("../../config/sessions/runtime-types.js").SaveSessionStore;
       updateSessionStore: typeof import("../../config/sessions/store.js").updateSessionStore;
-      updateSessionStoreEntry: typeof import("../../config/sessions/store.js").updateSessionStoreEntry;
       resolveSessionFilePath: typeof import("../../config/sessions/paths.js").resolveSessionFilePath;
     };
   };

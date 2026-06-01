@@ -1,6 +1,44 @@
 // Narrow session-store helpers for channel hot paths.
 
+import {
+  listSessionEntries as listAccessorSessionEntries,
+  loadSessionEntry,
+  replaceSessionEntry,
+  updateSessionEntry,
+} from "../config/sessions/session-accessor.js";
 import { loadSessionStore as loadSessionStoreImpl } from "../config/sessions/store-load.js";
+import type { SessionEntry } from "../config/sessions/types.js";
+
+type SessionStoreReadParams = {
+  agentId?: string;
+  env?: NodeJS.ProcessEnv;
+  hydrateSkillPromptRefs?: boolean;
+  sessionKey: string;
+  storePath?: string;
+};
+
+type SessionStoreListParams = Partial<Omit<SessionStoreReadParams, "sessionKey">>;
+
+type SessionStoreEntrySummary = {
+  sessionKey: string;
+  entry: SessionEntry;
+};
+
+type SessionStoreEntryUpdate = (
+  entry: SessionEntry,
+) => Promise<Partial<SessionEntry> | null> | Partial<SessionEntry> | null;
+
+type UpdateSessionStoreEntryParams = {
+  storePath: string;
+  sessionKey: string;
+  update: SessionStoreEntryUpdate;
+  skipMaintenance?: boolean;
+  takeCacheOwnership?: boolean;
+};
+
+type UpsertSessionEntryParams = SessionStoreReadParams & {
+  entry: SessionEntry;
+};
 
 /**
  * @deprecated Use getSessionEntry/listSessionEntries for reads and
@@ -8,6 +46,60 @@ import { loadSessionStore as loadSessionStoreImpl } from "../config/sessions/sto
  * legacy mutable whole-store shape and will remain a compatibility escape hatch.
  */
 export const loadSessionStore = loadSessionStoreImpl;
+
+/** Loads one session entry through the accessor seam. */
+export function getSessionEntry(params: SessionStoreReadParams): SessionEntry | undefined {
+  return loadSessionEntry({
+    agentId: params.agentId,
+    env: params.env,
+    hydrateSkillPromptRefs: params.hydrateSkillPromptRefs,
+    sessionKey: params.sessionKey,
+    storePath: params.storePath,
+  });
+}
+
+/** Lists session entries through the accessor seam. */
+export function listSessionEntries(
+  params: SessionStoreListParams = {},
+): SessionStoreEntrySummary[] {
+  return listAccessorSessionEntries({
+    agentId: params.agentId,
+    env: params.env,
+    hydrateSkillPromptRefs: params.hydrateSkillPromptRefs,
+    storePath: params.storePath,
+  });
+}
+
+/** Updates an existing session entry through the accessor seam. */
+export async function updateSessionStoreEntry(
+  params: UpdateSessionStoreEntryParams,
+): Promise<SessionEntry | null> {
+  return await updateSessionEntry(
+    {
+      sessionKey: params.sessionKey,
+      storePath: params.storePath,
+    },
+    params.update,
+    {
+      skipMaintenance: params.skipMaintenance,
+      takeCacheOwnership: params.takeCacheOwnership,
+    },
+  );
+}
+
+/** Replaces or creates one session entry through the accessor seam. */
+export async function upsertSessionEntry(params: UpsertSessionEntryParams): Promise<void> {
+  await replaceSessionEntry(
+    {
+      agentId: params.agentId,
+      env: params.env,
+      hydrateSkillPromptRefs: params.hydrateSkillPromptRefs,
+      sessionKey: params.sessionKey,
+      storePath: params.storePath,
+    },
+    params.entry,
+  );
+}
 
 export { resolveSessionStoreEntry } from "../config/sessions/store-entry.js";
 export {
@@ -22,16 +114,12 @@ export { resolveGroupSessionKey } from "../config/sessions/group.js";
 export { canonicalizeMainSessionAlias } from "../config/sessions/main-session.js";
 export {
   clearSessionStoreCacheForTest,
-  getSessionEntry,
-  listSessionEntries,
   patchSessionEntry,
   readSessionUpdatedAt,
   recordSessionMetaFromInbound,
   saveSessionStore,
   updateLastRoute,
   updateSessionStore,
-  updateSessionStoreEntry,
-  upsertSessionEntry,
 } from "../config/sessions/store.js";
 export {
   evaluateSessionFreshness,

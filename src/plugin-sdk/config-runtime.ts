@@ -5,6 +5,12 @@
  */
 
 import { loadSessionStore as loadSessionStoreImpl } from "../config/sessions/store-load.js";
+export {
+  getSessionEntry,
+  listSessionEntries,
+  updateSessionStoreEntry,
+  upsertSessionEntry,
+} from "./session-store-runtime.js";
 
 /**
  * @deprecated Use getSessionEntry/listSessionEntries for reads and
@@ -141,16 +147,12 @@ export type {
 } from "../config/types.js";
 export {
   clearSessionStoreCacheForTest,
-  getSessionEntry,
-  listSessionEntries,
   patchSessionEntry,
   readSessionUpdatedAt,
   recordSessionMetaFromInbound,
   saveSessionStore,
   updateLastRoute,
   updateSessionStore,
-  updateSessionStoreEntry,
-  upsertSessionEntry,
   resolveSessionStoreEntry,
 } from "../config/sessions/store.js";
 export { resolveSessionKey } from "../config/sessions/session-key.js";
