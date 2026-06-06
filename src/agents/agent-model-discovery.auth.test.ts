@@ -41,8 +41,8 @@ vi.mock("./model-auth-env-vars.js", () => ({
   }),
 }));
 
-vi.mock("./model-auth-env.js", () => ({
-  resolveEnvApiKey: (
+vi.mock("./model-auth-env-core.js", () => ({
+  resolveEnvApiKeyWithoutSetupFallback: (
     provider: string,
     env: NodeJS.ProcessEnv,
     options?: { workspaceDir?: string },

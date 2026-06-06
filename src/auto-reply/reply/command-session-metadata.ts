@@ -1,11 +1,17 @@
 // Tracks session metadata mutations made by command handlers during a turn.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import type { HandleCommandsParams } from "./commands-types.js";
 
 export type CommandSessionMetadataChange = {
   sessionKey: string;
   agentId?: string;
   reason: "command-metadata";
+};
+
+type CommandSessionMetadataTargetParams = {
+  agentId?: string;
+  ctx?: unknown;
+  rootCtx?: unknown;
+  sessionKey?: string;
 };
 
 const commandSessionMetadataChanges = new WeakMap<object, CommandSessionMetadataChange[]>();
@@ -26,7 +32,7 @@ function addChange(target: object, change: CommandSessionMetadataChange): void {
 }
 
 export function markCommandSessionMetadataChanged(
-  params: Pick<HandleCommandsParams, "agentId" | "ctx" | "rootCtx" | "sessionKey">,
+  params: CommandSessionMetadataTargetParams,
 ): void {
   const sessionKey = normalizeOptionalString(params.sessionKey);
   if (!sessionKey) {

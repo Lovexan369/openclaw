@@ -3,7 +3,7 @@ import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { asDateTimestampMs } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { coerceSecretRef } from "../config/types.secrets.js";
-import type { AuthProfileCredential, AuthProfileStore } from "./auth-profiles.js";
+import type { AuthProfileCredential, AuthProfileStore } from "./auth-profiles/types.js";
 
 // Converts auth-profile credentials into the compact credential map consumed by
 // agent runtimes. Secret refs can be represented by markers without reading
