@@ -91,7 +91,7 @@ async function withGatewayChatHarness(
     ws.close();
     await Promise.all(
       tempDirs.map((dir) =>
-        fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }),
+        fs.rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }),
       ),
     );
   }

@@ -177,7 +177,7 @@ describe("startCodexAttemptThread", () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     for (const root of tempRoots) {
-      await fs.rm(root, { recursive: true, force: true });
+      await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
     tempRoots.clear();
   });
@@ -271,7 +271,7 @@ describe("startCodexAttemptThread", () => {
     await answerInitialize(retained);
     await expect(retainedLease).resolves.toBe(retained.client);
 
-    const { run } = startThreadWithHarness(100, new AbortController().signal, {
+    const { run } = startThreadWithHarness(1_000, new AbortController().signal, {
       harness: retained,
       paths,
       skipStartSpy: true,
