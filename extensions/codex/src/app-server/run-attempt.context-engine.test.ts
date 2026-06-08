@@ -2,6 +2,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { AgentMessage } from "openclaw/plugin-sdk/agent-core";
 import type { EmbeddedRunAttemptParams } from "openclaw/plugin-sdk/agent-harness";
 import {
@@ -30,6 +31,30 @@ function setCodexAppServerClientFactoryForTest(factory: CodexAppServerClientFact
 
 function resetCodexAppServerClientFactoryForTest(): void {
   codexAppServerClientFactoryForTest = undefined;
+}
+
+function isTransientRemoveError(error: unknown): boolean {
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? String((error as { code?: unknown }).code)
+      : undefined;
+  return code === "ENOTEMPTY" || code === "EBUSY" || code === "EPERM";
+}
+
+async function removeTempDirForTest(dir: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await fs.rm(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (!isTransientRemoveError(error)) {
+        throw error;
+      }
+      await delay(20 * (attempt + 1));
+    }
+  }
+
+  await fs.rm(dir, { recursive: true, force: true });
 }
 
 function runCodexAppServerAttempt(
@@ -312,7 +337,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
   afterEach(async () => {
     resetCodexAppServerClientFactoryForTest();
     vi.restoreAllMocks();
-    await fs.rm(tempDir, { recursive: true, force: true });
+    await removeTempDirForTest(tempDir);
   });
 
   it("bootstraps and assembles non-legacy context before the Codex turn starts", async () => {
