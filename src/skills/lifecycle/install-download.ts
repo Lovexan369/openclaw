@@ -10,10 +10,10 @@ import { isWindowsDrivePath } from "../../infra/archive-path.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { root as fsRoot } from "../../infra/fs-safe.js";
 import { assertCanonicalPathWithinBase } from "../../infra/install-safe-path.js";
+import { fetchUntrustedUrl } from "../../infra/net/egress-fetch.js";
 import { isWithinDir } from "../../infra/path-safety.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { ensureDir, resolveUserPath } from "../../utils.js";
-import { buildTimeoutAbortSignal } from "../../utils/fetch-timeout.js";
 import { resolveSkillToolsRootDir } from "../runtime/tools-dir.js";
 import type { SkillEntry, SkillInstallSpec } from "../types.js";
 import { formatInstallFailureMessage } from "./install-output.js";
@@ -40,7 +40,6 @@ async function cancelIgnoredResponseBody(response: Response): Promise<void> {
   }
   await Promise.resolve(cancel.call(body)).catch(() => undefined);
 }
-
 function resolveDownloadTargetDir(entry: SkillEntry, spec: SkillInstallSpec): string {
   const root = resolveSkillToolsRootDir(entry);
   const raw = spec.targetDir?.trim();
@@ -102,14 +101,14 @@ async function downloadFile(params: {
     boundaryLabel: "skill tools directory",
   });
   const tempPath = path.join(stagingDir, `${randomUUID()}.tmp`);
-  const timeout = buildTimeoutAbortSignal({
-    timeoutMs: Math.max(1_000, params.timeoutMs),
-    operation: "skill-install-download",
-    url: params.url,
-  });
-  let response: Response | undefined;
+  let fetched: Awaited<ReturnType<typeof fetchUntrustedUrl>> | undefined;
   try {
-    response = await fetch(params.url, timeout.signal ? { signal: timeout.signal } : {});
+    fetched = await fetchUntrustedUrl({
+      url: params.url,
+      timeoutMs: Math.max(1_000, params.timeoutMs),
+      operation: "skill-install-download",
+    });
+    const { response } = fetched;
     if (!response.ok || !response.body) {
       await cancelIgnoredResponseBody(response);
       throw new Error(`Download failed (${response.status} ${response.statusText})`);
@@ -125,11 +124,8 @@ async function downloadFile(params: {
     const stat = await fs.promises.stat(destPath);
     return { bytes: stat.size };
   } finally {
-    timeout.cleanup();
     await fs.promises.rm(tempPath, { force: true }).catch(() => undefined);
-    if (response) {
-      await cancelIgnoredResponseBody(response);
-    }
+    await fetched?.release().catch(() => undefined);
   }
 }
 

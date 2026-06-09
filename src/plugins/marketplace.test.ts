@@ -17,6 +17,7 @@ let installPluginFromMarketplace: typeof import("./marketplace.js").installPlugi
 let listMarketplacePlugins: typeof import("./marketplace.js").listMarketplacePlugins;
 let resolveMarketplaceInstallShortcut: typeof import("./marketplace.js").resolveMarketplaceInstallShortcut;
 const tempOutsideDirs: string[] = [];
+const MARKETPLACE_ARCHIVE_URL = "https://93.184.216.34/frontend-design.tgz";
 
 vi.mock("./install.js", () => ({
   installPluginFromPath: (...args: unknown[]) => installPluginFromPathMock(...args),
@@ -193,9 +194,10 @@ function expectRemoteCloneCommand() {
   expect(options).toEqual({ timeoutMs: 120_000 });
 }
 
-function expectFetchDownloadCall(url = "https://example.com/frontend-design.tgz") {
+function expectFetchDownloadCall(url = MARKETPLACE_ARCHIVE_URL) {
   const [inputUrl, init] = fetchDownloadInput();
   expect(inputUrl).toBe(url);
+  expect(init.redirect).toBe("manual");
   expect(init.signal).toBeInstanceOf(AbortSignal);
 }
 
@@ -660,7 +662,7 @@ describe("marketplace plugins", () => {
         plugins: [
           {
             name: "frontend-design",
-            source: "https://example.com/frontend-design.tgz",
+            source: MARKETPLACE_ARCHIVE_URL,
           },
         ],
       });
@@ -672,7 +674,7 @@ describe("marketplace plugins", () => {
 
       expect(result).toEqual({
         ok: false,
-        error: "failed to download https://example.com/frontend-design.tgz: empty response body",
+        error: `failed to download ${MARKETPLACE_ARCHIVE_URL}: empty response body`,
       });
       expectFetchDownloadCall();
       expect(installPluginFromPathMock).not.toHaveBeenCalled();
@@ -704,6 +706,32 @@ describe("marketplace plugins", () => {
     });
   });
 
+  it("blocks local archive URLs before network fetch in stock direct mode", async () => {
+    await withTempDir("openclaw-marketplace-test-", async (rootDir) => {
+      const manifestPath = await writeMarketplaceManifest(rootDir, {
+        plugins: [
+          {
+            name: "frontend-design",
+            source: "http://127.0.0.1/frontend-design.tgz",
+          },
+        ],
+      });
+
+      const result = await installPluginFromMarketplace({
+        marketplace: manifestPath,
+        plugin: "frontend-design",
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toContain("failed to download http://127.0.0.1/frontend-design.tgz");
+        expect(result.error).toContain("Blocked");
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(installPluginFromPathMock).not.toHaveBeenCalled();
+    });
+  });
+
   it("rejects Windows drive-relative archive filenames from redirects", async () => {
     await withTempDir("openclaw-marketplace-test-", async (rootDir) => {
       fetchMock.mockResolvedValueOnce(
@@ -718,7 +746,7 @@ describe("marketplace plugins", () => {
         plugins: [
           {
             name: "frontend-design",
-            source: "https://example.com/frontend-design.tgz",
+            source: MARKETPLACE_ARCHIVE_URL,
           },
         ],
       });
@@ -730,8 +758,7 @@ describe("marketplace plugins", () => {
 
       expect(result).toEqual({
         ok: false,
-        error:
-          "failed to download https://example.com/frontend-design.tgz: invalid download filename",
+        error: `failed to download ${MARKETPLACE_ARCHIVE_URL}: invalid download filename`,
       });
       expect(installPluginFromPathMock).not.toHaveBeenCalled();
     });
@@ -758,7 +785,7 @@ describe("marketplace plugins", () => {
         plugins: [
           {
             name: "frontend-design",
-            source: "https://example.com/frontend-design.tgz",
+            source: MARKETPLACE_ARCHIVE_URL,
           },
         ],
       });
@@ -776,7 +803,7 @@ describe("marketplace plugins", () => {
     });
   });
 
-  it("downloads archive plugin sources through direct fetch with a timeout signal", async () => {
+  it("downloads archive plugin sources through the canonical untrusted egress helper", async () => {
     await withTempDir("openclaw-marketplace-test-", async (rootDir) => {
       fetchMock.mockResolvedValueOnce(
         responseWithUrl(
@@ -797,7 +824,7 @@ describe("marketplace plugins", () => {
         plugins: [
           {
             name: "frontend-design",
-            source: "https://example.com/frontend-design.tgz",
+            source: MARKETPLACE_ARCHIVE_URL,
           },
         ],
       });
@@ -850,7 +877,7 @@ describe("marketplace plugins", () => {
         plugins: [
           {
             name: "frontend-design",
-            source: "https://example.com/frontend-design.tgz",
+            source: MARKETPLACE_ARCHIVE_URL,
           },
         ],
       });
@@ -867,8 +894,7 @@ describe("marketplace plugins", () => {
       expect(result).toEqual({
         ok: false,
         error:
-          "failed to download https://example.com/frontend-design.tgz: " +
-          "download timed out after 1000ms",
+          `failed to download ${MARKETPLACE_ARCHIVE_URL}: ` + "download timed out after 1000ms",
       });
       expect(reader.cancel).toHaveBeenCalledTimes(1);
       expect(reader.releaseLock).toHaveBeenCalledTimes(1);
@@ -895,7 +921,7 @@ describe("marketplace plugins", () => {
         plugins: [
           {
             name: "frontend-design",
-            source: "https://example.com/frontend-design.tgz",
+            source: MARKETPLACE_ARCHIVE_URL,
           },
         ],
       });
@@ -908,8 +934,7 @@ describe("marketplace plugins", () => {
       expect(result).toEqual({
         ok: false,
         error:
-          "failed to download https://example.com/frontend-design.tgz: " +
-          "streaming response body unavailable",
+          `failed to download ${MARKETPLACE_ARCHIVE_URL}: ` + "streaming response body unavailable",
       });
       expect(arrayBuffer).not.toHaveBeenCalled();
       expect(installPluginFromPathMock).not.toHaveBeenCalled();
@@ -950,7 +975,7 @@ describe("marketplace plugins", () => {
         plugins: [
           {
             name: "frontend-design",
-            source: "https://example.com/frontend-design.tgz",
+            source: MARKETPLACE_ARCHIVE_URL,
           },
         ],
       });
@@ -963,7 +988,7 @@ describe("marketplace plugins", () => {
       expect(result).toEqual({
         ok: false,
         error:
-          "failed to download https://example.com/frontend-design.tgz: " +
+          `failed to download ${MARKETPLACE_ARCHIVE_URL}: ` +
           "download too large: 268435457 bytes (limit: 268435456 bytes)",
       });
       expect(arrayBuffer).not.toHaveBeenCalled();
@@ -995,7 +1020,7 @@ describe("marketplace plugins", () => {
         plugins: [
           {
             name: "frontend-design",
-            source: "https://example.com/frontend-design.tgz",
+            source: MARKETPLACE_ARCHIVE_URL,
           },
         ],
       });
@@ -1008,8 +1033,7 @@ describe("marketplace plugins", () => {
       expect(result).toEqual({
         ok: false,
         error:
-          "failed to download https://example.com/frontend-design.tgz: " +
-          "invalid content-length header: 1e9",
+          `failed to download ${MARKETPLACE_ARCHIVE_URL}: ` + "invalid content-length header: 1e9",
       });
       expect(reader.read).not.toHaveBeenCalled();
       expect(installPluginFromPathMock).not.toHaveBeenCalled();
@@ -1043,7 +1067,7 @@ describe("marketplace plugins", () => {
         plugins: [
           {
             name: "frontend-design",
-            source: "https://example.com/frontend-design.tgz",
+            source: MARKETPLACE_ARCHIVE_URL,
           },
         ],
       });
@@ -1056,7 +1080,7 @@ describe("marketplace plugins", () => {
       expect(result).toEqual({
         ok: false,
         error:
-          "failed to download https://example.com/frontend-design.tgz: " +
+          `failed to download ${MARKETPLACE_ARCHIVE_URL}: ` +
           "download too large: 268435457 bytes (limit: 268435456 bytes)",
       });
       expect(reader.read).toHaveBeenCalledTimes(1);
@@ -1077,7 +1101,7 @@ describe("marketplace plugins", () => {
         plugins: [
           {
             name: "frontend-design",
-            source: "https://user:pass@example.com/frontend-design.tgz",
+            source: "https://user:pass@93.184.216.34/frontend-design.tgz",
           },
         ],
       });
@@ -1092,7 +1116,7 @@ describe("marketplace plugins", () => {
         return;
       }
       expect(result.error).toContain(
-        "failed to download https://***:***@example.com/frontend-design.tgz:",
+        "failed to download https://***:***@93.184.216.34/frontend-design.tgz:",
       );
       expect(result.error).toContain("Authorization: Bearer sk-123…mnop");
       expect(result.error).not.toContain("user:pass@");
@@ -1118,7 +1142,7 @@ describe("marketplace plugins", () => {
         plugins: [
           {
             name: "frontend-design",
-            source: "https://example.com/frontend-design.tgz",
+            source: MARKETPLACE_ARCHIVE_URL,
           },
         ],
       });
@@ -1131,7 +1155,7 @@ describe("marketplace plugins", () => {
       expect(result).toEqual({
         ok: false,
         error:
-          "failed to download https://example.com/frontend-design.tgz: " +
+          `failed to download ${MARKETPLACE_ARCHIVE_URL}: ` +
           "Blocked hostname (not in allowlist): 169.254.169.254",
       });
       expect(installPluginFromPathMock).not.toHaveBeenCalled();

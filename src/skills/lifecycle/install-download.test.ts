@@ -140,6 +140,7 @@ function mockTarExtractionFlow(params: {
 
 let workspaceDir = "";
 let testState: OpenClawTestState | undefined;
+const PUBLIC_DOWNLOAD_BASE_URL = "https://93.184.216.34";
 beforeAll(async () => {
   testState = await createInstallDownloadTestState();
   workspaceDir = testState.workspaceDir;
@@ -170,7 +171,7 @@ describe("installDownloadSpec extraction safety", () => {
     const result = await installDownloadSpec({
       entry,
       spec: buildDownloadSpec({
-        url: "https://example.invalid/good.zip",
+        url: `${PUBLIC_DOWNLOAD_BASE_URL}/good.zip`,
         archive: "zip",
         targetDir: "../outside",
       }),
@@ -193,7 +194,7 @@ describe("installDownloadSpec extraction safety", () => {
       spec: {
         kind: "download",
         id: "dl",
-        url: "https://example.invalid/payload.bin",
+        url: `${PUBLIC_DOWNLOAD_BASE_URL}/payload.bin`,
         extract: false,
         targetDir: "runtime",
       },
@@ -228,7 +229,7 @@ describe("installDownloadSpec extraction safety", () => {
       spec: {
         kind: "download",
         id: "dl",
-        url: "https://example.invalid/broken.bin",
+        url: `${PUBLIC_DOWNLOAD_BASE_URL}/broken.bin`,
         extract: false,
         targetDir: "runtime",
       },
@@ -238,6 +239,27 @@ describe("installDownloadSpec extraction safety", () => {
     expect(result.ok).toBe(false);
     expect(result.stderr).toContain("Download failed (500 Server Error)");
     expect(wasCanceled()).toBe(true);
+  });
+
+  it("rejects local download URLs before fetching in stock direct mode", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await installDownloadSpec({
+      entry: buildEntry("local-download"),
+      spec: {
+        kind: "download",
+        id: "dl",
+        url: "http://127.0.0.1/payload.bin",
+        extract: false,
+        targetDir: "runtime",
+      },
+      timeoutMs: 30_000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain("Blocked");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("rejects non-HTTP download URLs before fetching", async () => {
@@ -275,7 +297,7 @@ describe("installDownloadSpec extraction safety", () => {
       spec: {
         kind: "download",
         id: "dl",
-        url: "https://example.invalid/broken.bin",
+        url: `${PUBLIC_DOWNLOAD_BASE_URL}/broken.bin`,
         extract: false,
         targetDir: "runtime",
       },
@@ -321,7 +343,7 @@ describe("installDownloadSpec extraction safety", () => {
         spec: {
           kind: "download",
           id: "dl",
-          url: "https://example.invalid/payload.bin",
+          url: `${PUBLIC_DOWNLOAD_BASE_URL}/payload.bin`,
           extract: false,
           targetDir: "runtime",
         },
@@ -340,7 +362,7 @@ describe("installDownloadSpec extraction safety (tar.bz2)", () => {
       {
         label: "rejects archives containing symlinks",
         name: "tbz2-symlink",
-        url: "https://example.invalid/evil.tbz2",
+        url: `${PUBLIC_DOWNLOAD_BASE_URL}/evil.tbz2`,
         listOutput: "link\n",
         verboseListOutput: "lrwxr-xr-x  0 0 0 0 Jan  1 00:00 link -> ../outside\n",
         extract: "reject" as const,
@@ -351,7 +373,7 @@ describe("installDownloadSpec extraction safety (tar.bz2)", () => {
       {
         label: "extracts safe archives with stripComponents",
         name: "tbz2-ok",
-        url: "https://example.invalid/good.tbz2",
+        url: `${PUBLIC_DOWNLOAD_BASE_URL}/good.tbz2`,
         listOutput: "package/hello.txt\n",
         verboseListOutput: "-rw-r--r--  0 0 0 0 Jan  1 00:00 package/hello.txt\n",
         stripComponents: 1,
@@ -420,7 +442,7 @@ describe("installDownloadSpec extraction safety (tar.bz2)", () => {
 
     const result = await installDownloadSkill({
       name: "tbz2-preflight-change",
-      url: "https://example.invalid/change.tbz2",
+      url: `${PUBLIC_DOWNLOAD_BASE_URL}/change.tbz2`,
       archive: "tar.bz2",
       targetDir,
     });
@@ -466,7 +488,7 @@ describe("installDownloadSpec extraction safety (tar.bz2)", () => {
 
     const result = await installDownloadSkill({
       name: "tbz2-targetdir-symlink",
-      url: "https://example.invalid/evil.tbz2",
+      url: `${PUBLIC_DOWNLOAD_BASE_URL}/evil.tbz2`,
       archive: "tar.bz2",
       targetDir,
     });

@@ -43,6 +43,28 @@ describe("check-runtime-http-egress-boundary", () => {
     expect(violations[0]).toContain("raw runtime fetch must use src/infra/net/egress-fetch.ts");
   });
 
+  it("catches raw fetch in marketplace archive downloads", () => {
+    const violations = collect({
+      "src/plugins/marketplace.ts":
+        "async function downloadUrlToTempFile(url: string) { return fetch(url); }",
+    });
+
+    expect(violations).toEqual([expect.stringContaining("src/plugins/marketplace.ts")]);
+    expect(violations[0]).toContain("raw runtime fetch must use src/infra/net/egress-fetch.ts");
+  });
+
+  it("catches raw fetch in skill install downloads", () => {
+    const violations = collect({
+      "src/skills/lifecycle/install-download.ts":
+        "async function downloadFile(url: string) { return globalThis.fetch(url); }",
+    });
+
+    expect(violations).toEqual([
+      expect.stringContaining("src/skills/lifecycle/install-download.ts"),
+    ]);
+    expect(violations[0]).toContain("raw runtime fetch must use src/infra/net/egress-fetch.ts");
+  });
+
   it("allows documented transport exceptions", () => {
     const violations = collect({
       "extensions/telegram/src/fetch.ts":

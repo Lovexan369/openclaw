@@ -217,6 +217,15 @@ function rewriteRedirectInitForCrossOrigin(params: {
   };
 }
 
+async function cancelResponseBody(response: Response | undefined): Promise<void> {
+  const body = response?.body;
+  const cancel = body && (body as { cancel?: unknown }).cancel;
+  if (typeof cancel !== "function") {
+    return;
+  }
+  await Promise.resolve(cancel.call(body)).catch(() => undefined);
+}
+
 export function resolveEgressDispatcherPolicy(params: {
   url: string;
   dispatcherPolicy?: PinnedDispatcherPolicy;
@@ -375,7 +384,7 @@ export async function fetchWithEgressPolicy(
     }
     released = true;
     timeout.cleanup();
-    await response?.body?.cancel().catch(() => undefined);
+    await cancelResponseBody(response);
     await closeDispatcher(dispatcher);
   };
   try {
@@ -426,7 +435,7 @@ export async function fetchWithEgressPolicy(
       }
       const status = response.status;
       const location = response.headers.get("location");
-      await response.body?.cancel().catch(() => undefined);
+      await cancelResponseBody(response);
       response = undefined;
       await closeDispatcher(dispatcher);
       dispatcher = undefined;

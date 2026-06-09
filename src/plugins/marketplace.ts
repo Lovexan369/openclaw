@@ -10,11 +10,11 @@ import { formatErrorMessage } from "../infra/errors.js";
 import { pathExists } from "../infra/fs-safe.js";
 import { resolveOsHomeRelativePath } from "../infra/home-dir.js";
 import { tryReadJson } from "../infra/json-files.js";
+import { fetchUntrustedUrl } from "../infra/net/egress-fetch.js";
 import { isPathInside } from "../infra/path-guards.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import type { InstallPolicySource } from "../security/install-policy.js";
 import { resolveUserPath } from "../utils.js";
-import { buildTimeoutAbortSignal } from "../utils/fetch-timeout.js";
 import { isImmutableGitCommitRef } from "./git-install.js";
 import type { InstallSafetyOverrides } from "./install-security-scan.js";
 import { installPluginFromPath, type InstallPluginResult } from "./install.js";
@@ -861,17 +861,17 @@ async function downloadUrlToTempFile(
 > {
   let sourceFileName = "plugin.tgz";
   let tmpDir: string | undefined;
-  let timeout: ReturnType<typeof buildTimeoutAbortSignal> | undefined;
+  let fetched: Awaited<ReturnType<typeof fetchUntrustedUrl>> | undefined;
   try {
     sourceFileName = resolveSafeMarketplaceDownloadFileName(url, sourceFileName);
     const downloadTimeoutMs = resolveMarketplaceDownloadTimeoutMs(timeoutMs);
-    timeout = buildTimeoutAbortSignal({
+    fetched = await fetchUntrustedUrl({
+      url,
       timeoutMs: downloadTimeoutMs,
       operation: "marketplace-plugin-download",
-      url,
     });
-    const response = await fetch(url, timeout.signal ? { signal: timeout.signal } : {});
-    const finalUrl = response.url || url;
+    const { response } = fetched;
+    const finalUrl = fetched.finalUrl || url;
     try {
       if (!response.ok) {
         return {
@@ -926,7 +926,8 @@ async function downloadUrlToTempFile(
         },
       };
     } finally {
-      await cancelMarketplaceResponseBody(response);
+      await fetched.release();
+      fetched = undefined;
     }
   } catch (error) {
     if (tmpDir) {
@@ -937,16 +938,8 @@ async function downloadUrlToTempFile(
       error: formatMarketplaceDownloadError(url, formatErrorMessage(error)),
     };
   } finally {
-    timeout?.cleanup();
+    await fetched?.release().catch(() => undefined);
   }
-}
-
-async function cancelMarketplaceResponseBody(response: Response): Promise<void> {
-  const cancel = response.body && (response.body as { cancel?: unknown }).cancel;
-  if (typeof cancel !== "function") {
-    return;
-  }
-  await cancel.call(response.body).catch(() => undefined);
 }
 
 async function ensureInsideMarketplaceRoot(

@@ -82,10 +82,6 @@ const RAW_FETCH_ALLOWLIST = new Map(
       "operator/plugin configured package metadata endpoint; not arbitrary user/content URL egress; proxy.enabled is not honored by this owner",
     ],
     [
-      "src/skills/lifecycle/install-download.ts",
-      "operator-initiated skill package artifact download; not arbitrary user/content URL egress; proxy.enabled is not honored by this owner",
-    ],
-    [
       "packages/memory-host-sdk/src/host/remote-http.ts",
       "memory remote HTTP package owns URL validation on every hop; proxy.enabled is not honored by this package",
     ],
@@ -172,10 +168,6 @@ const RAW_FETCH_ALLOWLIST = new Map(
     [
       "src/plugin-sdk/provider-catalog-live-runtime.ts",
       "catalog live runtime type surface for dispatcher-aware callers; proxy.enabled handled by callers",
-    ],
-    [
-      "src/plugins/marketplace.ts",
-      "fixed OpenClaw marketplace endpoint; proxy.enabled is not honored by this owner",
     ],
     [
       "src/plugins/openai-compatible-embedding-provider.ts",
