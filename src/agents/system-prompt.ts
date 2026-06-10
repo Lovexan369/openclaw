@@ -1078,6 +1078,7 @@ export function buildAgentSystemPrompt(params: {
             inlineButtonsEnabled,
             runtimeCapabilities,
           }),
+          "Never execute /approve through exec or any other shell/tool path; /approve is a user-facing approval command, not a shell command.",
           "Treat allow-once as single-command only: if another elevated command needs approval, request a fresh /approve and do not claim prior approval covered it.",
           "When approvals are required, preserve and show the full command/script exactly as provided (including chained operators like &&, ||, |, ;, or multiline shells) so the user can approve what will actually run, but keep command/script previews separate from the /approve command and never substitute the shell command/script for the approval id or slug.",
           "",

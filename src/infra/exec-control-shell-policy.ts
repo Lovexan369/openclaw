@@ -30,8 +30,6 @@ const EXEC_APPROVAL_DENY_MESSAGE = [
 const SECURITY_AUDIT_SUPPRESSION_WARNING =
   "Warning: security audit suppression changes require explicit approval unless exec is running in yolo mode.";
 
-const SSH_FILE_READ_WARNING = "Warning: Reading SSH files requires explicit approval.";
-
 const OPENCLAW_FLAGS_WITH_VALUES = new Set([
   "--channel",
   "--config",
@@ -55,58 +53,6 @@ const PACKAGE_RUNNER_VALUE_FLAGS = new Set([
 ]);
 const PACKAGE_RUNNER_CALL_FLAGS = new Set(["-c", "--call"]);
 const NPM_WORKSPACE_VALUE_FLAGS = new Set(["-w", "--workspace"]);
-const CURL_UPLOAD_FILE_OPTIONS = new Set(["-T", "--upload-file"]);
-const CURL_FILE_READ_OPTIONS = new Set(["-K", "--config", "--netrc-file"]);
-const CURL_FILE_URL_OPTIONS = new Set(["--url"]);
-const CURL_STACKABLE_SHORT_FLAG_OPTIONS = new Set([
-  "a",
-  "f",
-  "G",
-  "g",
-  "I",
-  "i",
-  "J",
-  "j",
-  "k",
-  "L",
-  "l",
-  "M",
-  "N",
-  "n",
-  "O",
-  "p",
-  "q",
-  "R",
-  "S",
-  "s",
-  "Z",
-]);
-const CURL_AT_FILE_OPTIONS = new Set([
-  "-d",
-  "--data",
-  "--data-ascii",
-  "--data-binary",
-  "--data-urlencode",
-  "-F",
-  "--form",
-]);
-const CURL_NAME_AT_FILE_OPTIONS = new Set(["--data-urlencode"]);
-const SSH_FILE_READER_EXECUTABLES = new Set([
-  "awk",
-  "cat",
-  "cp",
-  "dd",
-  "grep",
-  "head",
-  "less",
-  "more",
-  "powershell",
-  "python",
-  "python3",
-  "sed",
-  "tail",
-  "tar",
-]);
 
 function normalizeCommandBaseName(token: string | undefined): string {
   if (!token) {
@@ -311,195 +257,6 @@ function textMentionsSecurityAuditSuppressions(value: string): boolean {
   );
 }
 
-function pathMatchesStaticSshPath(value: string): boolean {
-  const normalized = value.replace(/\\/gu, "/");
-  return (
-    normalized === "~/.ssh" ||
-    normalized.startsWith("~/.ssh/") ||
-    normalized === ".ssh" ||
-    normalized.startsWith(".ssh/") ||
-    normalized === "./.ssh" ||
-    normalized.startsWith("./.ssh/") ||
-    normalized.includes("/.ssh/")
-  );
-}
-
-function textMentionsStaticSshPath(value: string): boolean {
-  const normalized = value.replace(/\\/gu, "/");
-  return (
-    /(?:^|[^A-Za-z0-9_./~-])(?:~\/\.ssh|\.\/\.ssh|\.ssh)(?:\/|$|[^A-Za-z0-9_./-])/u.test(
-      normalized,
-    ) || /(?:^|[^A-Za-z0-9_./-])\/[^"'`\s]*\/\.ssh(?:\/|$|[^A-Za-z0-9_./-])/u.test(normalized)
-  );
-}
-
-function curlFileOperandPathCandidates(value: string, option: string): string[] {
-  const trimmed = value.trim();
-  const candidates: string[] = [];
-  if (trimmed.startsWith("@") || trimmed.startsWith("<")) {
-    candidates.push(trimmed.slice(1));
-  }
-  const formFile = /(?:^|=)(?:@|<)([^;]+)/u.exec(trimmed)?.[1];
-  if (formFile) {
-    candidates.push(formFile);
-  }
-  if (CURL_NAME_AT_FILE_OPTIONS.has(option)) {
-    const namedFile = /^[^=@<]+@([^;]+)/u.exec(trimmed)?.[1];
-    if (namedFile) {
-      candidates.push(namedFile);
-    }
-  }
-  return candidates;
-}
-
-function combinedCurlShortOptionIndex(token: string, option: string): number {
-  const optionChar = option[1];
-  if (!optionChar || !token.startsWith("-") || token.startsWith("--")) {
-    return -1;
-  }
-  const optionIndex = token.indexOf(optionChar, 1);
-  if (optionIndex < 1) {
-    return -1;
-  }
-  const prefix = token.slice(1, optionIndex);
-  for (let index = 0; index < prefix.length; index += 1) {
-    if (!CURL_STACKABLE_SHORT_FLAG_OPTIONS.has(prefix[index] ?? "")) {
-      return -1;
-    }
-  }
-  return optionIndex;
-}
-
-function curlOptionValue(params: {
-  argv: readonly string[];
-  index: number;
-  option: string;
-}): { option: string; value: string; nextIndex: number } | null {
-  const token = params.argv[params.index] ?? "";
-  if (token === params.option) {
-    const value = params.argv[params.index + 1];
-    return value === undefined
-      ? null
-      : { option: params.option, value, nextIndex: params.index + 2 };
-  }
-  if (params.option.startsWith("--") && token.startsWith(`${params.option}=`)) {
-    return {
-      option: params.option,
-      value: token.slice(params.option.length + 1),
-      nextIndex: params.index + 1,
-    };
-  }
-  if (params.option.startsWith("-") && !params.option.startsWith("--")) {
-    const attached = token.startsWith(params.option) ? token.slice(params.option.length) : "";
-    if (attached.length > 0) {
-      return { option: params.option, value: attached, nextIndex: params.index + 1 };
-    }
-    const optionIndex = combinedCurlShortOptionIndex(token, params.option);
-    if (optionIndex >= 1) {
-      const value = token.slice(optionIndex + 1);
-      if (value.length > 0) {
-        return { option: params.option, value, nextIndex: params.index + 1 };
-      }
-      const next = params.argv[params.index + 1];
-      return next === undefined
-        ? null
-        : { option: params.option, value: next, nextIndex: params.index + 2 };
-    }
-  }
-  return null;
-}
-
-function curlFileUrlPath(value: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed.toLowerCase().startsWith("file://")) {
-    return null;
-  }
-  let path = trimmed.slice("file://".length);
-  if (path.startsWith("localhost/")) {
-    path = path.slice("localhost".length);
-  } else if (!path.startsWith("/")) {
-    const slashIndex = path.indexOf("/");
-    if (slashIndex === -1) {
-      return null;
-    }
-    path = path.slice(slashIndex);
-  }
-  try {
-    return decodeURIComponent(path);
-  } catch {
-    return path;
-  }
-}
-
-function curlFileUrlMatchesStaticSshPath(value: string): boolean {
-  const path = curlFileUrlPath(value);
-  return path !== null && pathMatchesStaticSshPath(path);
-}
-
-function curlReadsSshFile(argv: readonly string[]): boolean {
-  for (let index = 1; index < argv.length; ) {
-    const token = argv[index] ?? "";
-    if (token === "--") {
-      return argv.slice(index + 1).some(curlFileUrlMatchesStaticSshPath);
-    }
-    if (curlFileUrlMatchesStaticSshPath(token)) {
-      return true;
-    }
-    const fileRead = [...CURL_FILE_READ_OPTIONS]
-      .map((option) => curlOptionValue({ argv, index, option }))
-      .find(
-        (match): match is { option: string; value: string; nextIndex: number } => match !== null,
-      );
-    if (fileRead) {
-      if (pathMatchesStaticSshPath(fileRead.value)) {
-        return true;
-      }
-      index = fileRead.nextIndex;
-      continue;
-    }
-    const fileUrl = [...CURL_FILE_URL_OPTIONS]
-      .map((option) => curlOptionValue({ argv, index, option }))
-      .find(
-        (match): match is { option: string; value: string; nextIndex: number } => match !== null,
-      );
-    if (fileUrl) {
-      if (curlFileUrlMatchesStaticSshPath(fileUrl.value)) {
-        return true;
-      }
-      index = fileUrl.nextIndex;
-      continue;
-    }
-    const upload = [...CURL_UPLOAD_FILE_OPTIONS]
-      .map((option) => curlOptionValue({ argv, index, option }))
-      .find(
-        (match): match is { option: string; value: string; nextIndex: number } => match !== null,
-      );
-    if (upload) {
-      if (pathMatchesStaticSshPath(upload.value)) {
-        return true;
-      }
-      index = upload.nextIndex;
-      continue;
-    }
-    const atFile = [...CURL_AT_FILE_OPTIONS]
-      .map((option) => curlOptionValue({ argv, index, option }))
-      .find(
-        (match): match is { option: string; value: string; nextIndex: number } => match !== null,
-      );
-    if (atFile) {
-      if (
-        curlFileOperandPathCandidates(atFile.value, atFile.option).some(pathMatchesStaticSshPath)
-      ) {
-        return true;
-      }
-      index = atFile.nextIndex;
-      continue;
-    }
-    index += 1;
-  }
-  return false;
-}
-
 function candidateText(candidate: ControlShellCandidate): string {
   return `${candidate.raw} ${candidate.argv.join(" ")}`;
 }
@@ -560,34 +317,6 @@ function requiresSecurityAuditSuppressionApproval(params: {
     );
   }
   return true;
-}
-
-function requiresSshFileReadApproval(candidates: readonly ControlShellCandidate[]): boolean {
-  return candidates.some((candidate) => {
-    const executable = normalizeCommandBaseName(candidate.argv[0]);
-    if (executable === "curl") {
-      return (
-        curlReadsSshFile(candidate.argv) ||
-        (/[<>]/u.test(candidate.raw) && textMentionsStaticSshPath(candidateText(candidate)))
-      );
-    }
-    if (!SSH_FILE_READER_EXECUTABLES.has(executable)) {
-      return false;
-    }
-    return (
-      candidate.argv.slice(1).some(pathMatchesStaticSshPath) ||
-      textMentionsStaticSshPath(candidateText(candidate))
-    );
-  });
-}
-
-function sshRedirectFallbackCandidate(command: string): ControlShellCandidate | null {
-  if (!/[<>]/u.test(command) || !textMentionsStaticSshPath(command)) {
-    return null;
-  }
-  const candidate = candidateFromRaw(command);
-  const executable = normalizeCommandBaseName(candidate.argv[0]);
-  return SSH_FILE_READER_EXECUTABLES.has(executable) || executable === "curl" ? candidate : null;
 }
 
 export function parseOpenClawChannelsLoginShellCommand(raw: string): boolean {
@@ -770,11 +499,6 @@ export async function inspectControlShellCommand(params: {
   }
   if (requiresSecurityAuditSuppressionApproval({ command, candidates })) {
     return { kind: "requires-approval", warning: SECURITY_AUDIT_SUPPRESSION_WARNING };
-  }
-  const sshRedirectCandidate = sshRedirectFallbackCandidate(command);
-  const sshCandidates = sshRedirectCandidate ? [...candidates, sshRedirectCandidate] : candidates;
-  if (requiresSshFileReadApproval(sshCandidates)) {
-    return { kind: "requires-approval", warning: SSH_FILE_READ_WARNING };
   }
 
   return { kind: "allow" };

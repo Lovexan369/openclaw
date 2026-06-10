@@ -64,11 +64,11 @@ describe("parsePluginApprovalRequested", () => {
       ...validPayload,
       request: {
         ...validPayload.request,
-        allowedDecisions: ["allow-once", "deny"],
+        allowedDecisions: ["allow-once", "bad", "deny", "allow-always", "deny"],
       },
     });
 
-    expect(result?.request.allowedDecisions).toEqual(["allow-once", "deny"]);
+    expect(result?.request.allowedDecisions).toEqual(["allow-once", "deny", "allow-always"]);
   });
 
   it("returns null when title is missing from request", () => {

@@ -2,7 +2,6 @@ import type { CommandResolution } from "./exec-command-resolution.js";
 import {
   isWindowsPlatform,
   rebuildWindowsShellCommandFromSource,
-  tokenizeWindowsSegment,
   windowsEscapeArg,
   type RebuiltShellCommandResult,
   type ShellSegmentRenderResult,
@@ -104,32 +103,6 @@ export function resolvePlannedSegmentArgv(segment: ExecCommandSegment): string[]
     argv[0] = resolvedExecutable;
   }
   return argv;
-}
-
-export function buildSafeShellCommand(params: {
-  command: string;
-  cwd?: string;
-  env?: NodeJS.ProcessEnv;
-  platform?: string | null;
-}): {
-  ok: boolean;
-  command?: string;
-  reason?: string;
-} {
-  if (!isWindowsPlatform(params.platform)) {
-    return { ok: false, reason: POSIX_RENDER_REPLACED_REASON };
-  }
-  const rebuilt = rebuildWindowsShellCommandFromSource({
-    command: params.command,
-    renderSegment: (segmentRaw) => {
-      const argv = tokenizeWindowsSegment(segmentRaw) ?? [];
-      if (argv.length === 0) {
-        return { ok: false, reason: "unable to parse windows command" };
-      }
-      return renderWindowsQuotedArgv(argv);
-    },
-  });
-  return finalizeRebuiltShellCommand(rebuilt);
 }
 
 export function buildSafeBinsShellCommand(params: {
