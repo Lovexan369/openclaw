@@ -2,13 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  evaluateExecAllowlist,
-  evaluateShellAllowlist,
+  evaluateExecAllowlistWithAuthorization as evaluateExecAllowlist,
+  evaluateShellAllowlistWithAuthorization as evaluateShellAllowlist,
   normalizeSafeBins,
 } from "./exec-approvals-allowlist.js";
 import {
   analyzeArgvCommand,
-  analyzeShellCommand,
   buildEnforcedShellCommand,
   resolvePlannedSegmentArgv,
   windowsEscapeArg,
@@ -16,15 +15,7 @@ import {
 import { makePathEnv, makeTempDir } from "./exec-approvals-test-helpers.js";
 import type { ExecAllowlistEntry } from "./exec-approvals.js";
 import { matchAllowlist } from "./exec-command-resolution.js";
-
-function expectAnalyzedShellCommand(
-  command: string,
-  platform?: NodeJS.Platform,
-): ReturnType<typeof analyzeShellCommand> {
-  const res = analyzeShellCommand({ command, platform });
-  expect(res.ok).toBe(true);
-  return res;
-}
+import { analyzeWindowsShellCommand } from "./windows-shell-command.js";
 
 function createSkillWrapperFixture() {
   const skillRoot = makeTempDir();
@@ -70,14 +61,6 @@ describe("exec approvals shell analysis", () => {
   });
 
   describe("shell parsing", () => {
-    it("fails closed for POSIX shell analysis compatibility calls", async () => {
-      expect(analyzeShellCommand({ command: "echo ok" })).toEqual({
-        ok: false,
-        reason: "POSIX shell analysis uses planShellAuthorization",
-        segments: [],
-      });
-    });
-
     it("parses argv commands", async () => {
       const res = analyzeArgvCommand({ argv: ["/bin/echo", "ok"] });
       expect(res.ok).toBe(true);
@@ -112,7 +95,7 @@ describe("exec approvals shell analysis", () => {
         'node tool.js "--msg=Hello!"',
       ];
       for (const command of cases) {
-        const res = analyzeShellCommand({ command, platform: "win32" });
+        const res = analyzeWindowsShellCommand({ command, platform: "win32" });
         expect(res.ok).toBe(true);
         expect(res.segments[0]?.argv[0]).toBe("node");
       }
@@ -127,13 +110,13 @@ describe("exec approvals shell analysis", () => {
         "for /f %i in (file.txt) do echo %i",
       ];
       for (const command of cases) {
-        const res = analyzeShellCommand({ command, platform: "win32" });
+        const res = analyzeWindowsShellCommand({ command, platform: "win32" });
         expect(res.ok).toBe(false);
       }
     });
 
     it("still rejects % inside double quotes on Windows", async () => {
-      const res = analyzeShellCommand({
+      const res = analyzeWindowsShellCommand({
         command: 'node tool.js "--user=%USERNAME%"',
         platform: "win32",
       });
@@ -149,7 +132,7 @@ describe("exec approvals shell analysis", () => {
         "node app.js $(whoami)",
       ];
       for (const command of cases) {
-        const res = analyzeShellCommand({ command, platform: "win32" });
+        const res = analyzeWindowsShellCommand({ command, platform: "win32" });
         expect(res.ok).toBe(false);
       }
     });
@@ -159,13 +142,13 @@ describe("exec approvals shell analysis", () => {
       // double-quoted strings and must be blocked to prevent unexpected expansion.
       const cases = ['node app.js "$?"', 'node app.js "$$"', "node app.js $?", "node app.js $$"];
       for (const command of cases) {
-        const res = analyzeShellCommand({ command, platform: "win32" });
+        const res = analyzeWindowsShellCommand({ command, platform: "win32" });
         expect(res.ok).toBe(false);
       }
     });
 
     it("allows bare $ not followed by identifier on Windows (e.g. UNC paths)", async () => {
-      const res = analyzeShellCommand({
+      const res = analyzeWindowsShellCommand({
         command: 'net use "\\\\host\\C$"',
         platform: "win32",
       });
@@ -182,7 +165,7 @@ describe("exec approvals shell analysis", () => {
         "node tool.js '--pattern=(x)'",
       ];
       for (const command of cases) {
-        const res = analyzeShellCommand({ command, platform: "win32" });
+        const res = analyzeWindowsShellCommand({ command, platform: "win32" });
         expect(res.ok).toBe(false);
       }
     });
@@ -190,7 +173,7 @@ describe("exec approvals shell analysis", () => {
     it("rejects % in single-quoted arguments on Windows", async () => {
       // Single quotes are literal in cmd.exe, so % is treated as unquoted and
       // can be used for variable-expansion injection.
-      const res = analyzeShellCommand({
+      const res = analyzeWindowsShellCommand({
         command: "node tool.js '--label=%USERNAME%'",
         platform: "win32",
       });
@@ -200,7 +183,7 @@ describe("exec approvals shell analysis", () => {
     it("tokenizer strips single quotes and treats content as one token on Windows", async () => {
       // tokenizeWindowsSegment recognises PowerShell single-quote quoting so that
       // 'hello world' is correctly parsed as a single argument during enforcement.
-      const res = analyzeShellCommand({
+      const res = analyzeWindowsShellCommand({
         command: "node tool.js 'hello world'",
         platform: "win32",
       });
@@ -209,7 +192,7 @@ describe("exec approvals shell analysis", () => {
     });
 
     it("parses '' as escaped apostrophe in Windows single-quoted args", async () => {
-      const res = analyzeShellCommand({
+      const res = analyzeWindowsShellCommand({
         command: "node tool.js 'O''Brien'",
         platform: "win32",
       });
@@ -220,7 +203,7 @@ describe("exec approvals shell analysis", () => {
     it("preserves empty double-quoted args on Windows", async () => {
       // tokenizeWindowsSegment must not drop "" — empty quoted args are intentional
       // (e.g. node tool.js "" passes an explicit empty string to the child process).
-      const res = analyzeShellCommand({
+      const res = analyzeWindowsShellCommand({
         command: 'node tool.js ""',
         platform: "win32",
       });
@@ -229,7 +212,7 @@ describe("exec approvals shell analysis", () => {
     });
 
     it("preserves empty single-quoted args on Windows", async () => {
-      const res = analyzeShellCommand({
+      const res = analyzeWindowsShellCommand({
         command: "node tool.js ''",
         platform: "win32",
       });
@@ -238,7 +221,7 @@ describe("exec approvals shell analysis", () => {
     });
 
     it("parses windows quoted executables", async () => {
-      const res = analyzeShellCommand({
+      const res = analyzeWindowsShellCommand({
         command: '"C:\\Program Files\\Tool\\tool.exe" --version',
         platform: "win32",
       });
@@ -251,7 +234,7 @@ describe("exec approvals shell analysis", () => {
       // literal " inside the outer double-quoted shell argument.  After stripping
       // the wrapper the payload must be unescaped so the tokenizer sees the
       // correct double-quote boundaries.
-      const res = analyzeShellCommand({
+      const res = analyzeWindowsShellCommand({
         command: 'powershell -Command "node a.js ""hello world"""',
         platform: "win32",
       });
@@ -265,7 +248,7 @@ describe("exec approvals shell analysis", () => {
       // the escape for the space-containing argument — after unescaping the
       // payload becomes "node a.js 'hello world'" which the tokenizer parses
       // as a single argv token.
-      const res = analyzeShellCommand({
+      const res = analyzeWindowsShellCommand({
         command: "powershell -Command 'node a.js ''hello world'''",
         platform: "win32",
       });
@@ -283,7 +266,7 @@ describe("exec approvals shell analysis", () => {
         "pwsh -ExecutionPolicy Bypass -Command 'node a.js'",
       ];
       for (const command of cases) {
-        const res = analyzeShellCommand({ command, platform: "win32" });
+        const res = analyzeWindowsShellCommand({ command, platform: "win32" });
         expect(res.ok).toBe(true);
         expect(res.segments[0]?.argv[0]).toBe("node");
       }
@@ -300,7 +283,7 @@ describe("exec approvals shell analysis", () => {
         'pwsh -ExecutionPolicy Bypass -WorkingDirectory "C:\\My Projects\\app" -Command "node a.js"',
       ];
       for (const command of cases) {
-        const res = analyzeShellCommand({ command, platform: "win32" });
+        const res = analyzeWindowsShellCommand({ command, platform: "win32" });
         expect(res.ok).toBe(true);
         expect(res.segments[0]?.argv[0]).toBe("node");
       }
@@ -321,7 +304,7 @@ describe("exec approvals shell analysis", () => {
         ["pwsh -c node a.js", "node"],
       ];
       for (const [command, expected] of cases) {
-        const res = analyzeShellCommand({ command, platform: "win32" });
+        const res = analyzeWindowsShellCommand({ command, platform: "win32" });
         expect(res.ok).toBe(true);
         expect(res.segments[0]?.argv[0]).toBe(expected);
       }
@@ -411,7 +394,7 @@ describe("exec approvals shell analysis", () => {
 
       expect(result.analysisOk).toBe(true);
       expect(result.allowlistSatisfied).toBe(false);
-      expect(result.segmentSatisfiedBy).toEqual([null]);
+      expect(result.segmentSatisfiedBy).toEqual([null, null, "allowlist"]);
     });
 
     it.each(['/usr/bin/echo "foo && bar"', '/usr/bin/echo "foo\\" && bar"'])(
@@ -698,7 +681,7 @@ describe("exec approvals shell analysis", () => {
     });
 
     describe("shell wrapper inline compound allowlist", () => {
-      const commonShells = ["sh", "bash", "zsh", "dash", "ksh", "fish", "ash"] as const;
+      const trustedShells = ["/bin/sh"] as const;
       type ShellFixture = {
         dir: string;
         env: NodeJS.ProcessEnv;
@@ -726,22 +709,21 @@ describe("exec approvals shell analysis", () => {
         }
       }
 
-      it.each(commonShells)(
+      it.each(trustedShells)(
         "evaluates inner chain commands for %s -c wrappers",
         async (shellBinary) => {
           if (process.platform === "win32") {
             return;
           }
           await withShellFixture(
-            [shellBinary, "cat", "printf", "gog-wrapper"],
+            ["cat", "printf", "wc"],
             async ({ binPath, dir, env }) => {
-              const shellPath = binPath(shellBinary);
               const catPath = binPath("cat");
               const printfPath = binPath("printf");
-              const gogPath = binPath("gog-wrapper");
+              const wcPath = binPath("wc");
               const result = await evaluateShellAllowlist({
-                command: `${shellPath} -c "cat SKILL.md && printf '---CMD---' && gog-wrapper calendar events"`,
-                allowlist: [{ pattern: catPath }, { pattern: printfPath }, { pattern: gogPath }],
+                command: `${shellBinary} -c "cat SKILL.md && printf '---CMD---' && wc -l SKILL.md"`,
+                allowlist: [{ pattern: catPath }, { pattern: printfPath }, { pattern: wcPath }],
                 safeBins: new Set(),
                 cwd: dir,
                 env,
@@ -962,7 +944,7 @@ describe("matchAllowlist with argPattern", () => {
 
 describe("Windows rebuildShellCommandFromSource", () => {
   it("builds enforced command for simple Windows command", async () => {
-    const analysis = analyzeShellCommand({
+    const analysis = analyzeWindowsShellCommand({
       command: "python3 a.py",
       platform: "win32",
     });

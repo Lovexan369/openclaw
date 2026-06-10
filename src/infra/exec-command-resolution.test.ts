@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { makePathEnv, makeTempDir } from "./exec-approvals-test-helpers.js";
 import {
-  evaluateExecAllowlist,
+  evaluateExecAllowlistWithAuthorization as evaluateExecAllowlist,
   resolvePlannedSegmentArgv,
   normalizeSafeBins,
   parseExecArgvToken,

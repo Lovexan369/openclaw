@@ -1,6 +1,5 @@
 import type { CommandResolution } from "./exec-command-resolution.js";
 import {
-  analyzeWindowsShellCommand,
   isWindowsPlatform,
   rebuildWindowsShellCommandFromSource,
   tokenizeWindowsSegment,
@@ -32,7 +31,10 @@ export {
   type ExecArgvToken,
 } from "./exec-command-resolution.js";
 
-export { isWindowsPlatform, windowsEscapeArg } from "./windows-shell-command.js";
+export {
+  isWindowsPlatform,
+  windowsEscapeArg,
+} from "./windows-shell-command.js";
 
 export type ExecCommandSegment = {
   raw: string;
@@ -55,7 +57,6 @@ export type ShellChainPart = {
   opToNext: ShellChainOperator | null;
 };
 
-const POSIX_ANALYSIS_REPLACED_REASON = "POSIX shell analysis uses planShellAuthorization";
 const POSIX_RENDER_REPLACED_REASON =
   "POSIX shell rendering uses buildAuthorizedShellCommandFromPlan";
 
@@ -103,18 +104,6 @@ export function resolvePlannedSegmentArgv(segment: ExecCommandSegment): string[]
     argv[0] = resolvedExecutable;
   }
   return argv;
-}
-
-export function analyzeShellCommand(params: {
-  command: string;
-  cwd?: string;
-  env?: NodeJS.ProcessEnv;
-  platform?: string | null;
-}): ExecCommandAnalysis {
-  if (isWindowsPlatform(params.platform)) {
-    return analyzeWindowsShellCommand(params);
-  }
-  return { ok: false, reason: POSIX_ANALYSIS_REPLACED_REASON, segments: [] };
 }
 
 export function buildSafeShellCommand(params: {

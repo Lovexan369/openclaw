@@ -10,9 +10,10 @@ import {
 } from "./exec-approvals-test-helpers.js";
 import {
   analyzeArgvCommand,
-  evaluateExecAllowlist,
-  evaluateShellAllowlist,
+  evaluateExecAllowlistWithAuthorization as evaluateExecAllowlist,
+  evaluateShellAllowlistWithAuthorization as evaluateShellAllowlist,
   requiresExecApproval,
+  resolveAllowAlwaysPersistenceDecision,
   resolveAllowAlwaysPatterns,
   resolveSafeBins,
 } from "./exec-approvals.js";
@@ -53,6 +54,30 @@ describe("resolveAllowAlwaysPatterns", () => {
         strictInlineEval: params.strictInlineEval,
       }),
     };
+  }
+
+  async function resolvePersistenceDecision(params: {
+    command: string;
+    dir: string;
+    env: Record<string, string | undefined>;
+  }) {
+    const analysis = await evaluateShellAllowlist({
+      command: params.command,
+      allowlist: [],
+      safeBins: new Set(),
+      cwd: params.dir,
+      env: params.env,
+      platform: process.platform,
+    });
+    return resolveAllowAlwaysPersistenceDecision({
+      commandText: params.command,
+      analysisOk: analysis.analysisOk,
+      segments: analysis.segments,
+      authorizationPlan: analysis.authorizationPlan,
+      cwd: params.dir,
+      env: params.env,
+      platform: process.platform,
+    });
   }
 
   async function expectAllowAlwaysBypassBlocked(params: {
@@ -239,6 +264,41 @@ describe("resolveAllowAlwaysPatterns", () => {
     expect(patterns).toStrictEqual([]);
   });
 
+  it("keeps exact-command fallback for static shell-wrapper payloads", async () => {
+    const dir = makeTempDir();
+    const decision = await resolvePersistenceDecision({
+      command: "/bin/sh -lc 'ls *.ts'",
+      dir,
+      env: makePathEnv(dir),
+    });
+
+    expect(decision).toEqual({
+      kind: "exact-command",
+      commandText: "/bin/sh -lc 'ls *.ts'",
+    });
+  });
+
+  it.each([
+    { command: "sh -c '$CMD'", reason: "runtime-payload" },
+    { command: "sh -c '`id`'", reason: "runtime-payload" },
+    { command: "sh -c 'echo $HOME'", reason: "runtime-payload" },
+  ])(
+    "keeps runtime shell-wrapper payloads one-shot for allow-always: $command",
+    async ({ command, reason }) => {
+      const dir = makeTempDir();
+      const decision = await resolvePersistenceDecision({
+        command,
+        dir,
+        env: makePathEnv(dir),
+      });
+
+      expect(decision).toEqual({
+        kind: "one-shot",
+        reasons: [reason],
+      });
+    },
+  );
+
   it("persists allow-always executable patterns with the trust realpath", async () => {
     const patterns = resolveAllowAlwaysPatterns({
       segments: [
@@ -419,15 +479,14 @@ describe("resolveAllowAlwaysPatterns", () => {
     }
     const dir = makeTempDir();
     const whoami = makeExecutable(dir, "whoami");
-    makeExecutable(dir, "zsh");
     const { persisted } = await resolvePersistedPatterns({
-      command: "zsh -c 'whoami'",
+      command: "/bin/sh -c 'whoami'",
       dir,
       env: makePathEnv(dir),
       safeBins: resolveSafeBins(undefined),
     });
     expect(persisted).toEqual([whoami]);
-    expect(persisted).not.toContain("/bin/zsh");
+    expect(persisted).not.toContain("/bin/sh");
   });
 
   it("extracts all inner binaries from shell chains and deduplicates", async () => {
@@ -437,9 +496,8 @@ describe("resolveAllowAlwaysPatterns", () => {
     const dir = makeTempDir();
     const whoami = makeExecutable(dir, "whoami");
     const ls = makeExecutable(dir, "ls");
-    makeExecutable(dir, "zsh");
     const { persisted } = await resolvePersistedPatterns({
-      command: "zsh -c 'whoami && ls && whoami'",
+      command: "/bin/sh -c 'whoami && ls && whoami'",
       env: makePathEnv(dir),
       dir,
       safeBins: resolveSafeBins(undefined),
@@ -703,7 +761,7 @@ $0 \\"$1\\"" touch {marker}`,
     expect(patterns).toStrictEqual([]);
   });
 
-  it("uses the planner for path-scoped shell wrapper payloads", async () => {
+  it("does not persist inner payloads from path-scoped shell wrappers", async () => {
     if (process.platform === "win32") {
       return;
     }
@@ -715,7 +773,7 @@ $0 \\"$1\\"" touch {marker}`,
       env: makePathEnv(dir),
       safeBins: resolveSafeBins(undefined),
     });
-    expect(persisted).toEqual([whoami]);
+    expect(persisted).toEqual([]);
   });
 
   it("does not derive reusable payload trust from dispatch-wrapped shell wrappers", async () => {

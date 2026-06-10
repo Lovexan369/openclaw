@@ -4,7 +4,10 @@ import {
   makeMockCommandResolution,
   makeMockExecutableResolution,
 } from "./exec-approvals-test-helpers.js";
-import { evaluateExecAllowlist, type ExecAllowlistEntry } from "./exec-approvals.js";
+import {
+  evaluateExecAllowlistWithAuthorization as evaluateExecAllowlist,
+  type ExecAllowlistEntry,
+} from "./exec-approvals.js";
 
 describe("exec approvals allowlist evaluation", () => {
   async function evaluateAutoAllowSkills(params: {

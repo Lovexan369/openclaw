@@ -1,5 +1,6 @@
 import type { CommandExplanation, CommandRisk } from "../command-explainer/types.js";
 import type { ExecCommandSegment } from "../exec-approvals-analysis.js";
+import { splitShellArgs } from "../../utils/shell-argv.js";
 import { analyzeCommandForPolicy } from "./policy.js";
 import { detectCommandCarrierArgv, detectInlineEvalInSegments } from "./risks.js";
 
@@ -20,6 +21,8 @@ function riskLabel(risk: CommandRisk): string {
       return risk.flag ? `${risk.command} ${risk.flag}` : risk.command;
     case "dynamic-argument":
       return `${risk.command} dynamic argument`;
+    case "env-assignment":
+      return risk.name;
     case "source":
       return risk.command;
     case "function-definition":
@@ -80,6 +83,25 @@ export function summarizeCommandSegmentsForDisplay(
   };
 }
 
+function summarizeSimpleShellTextForDisplay(params: {
+  commandText: string;
+  cwd?: string;
+}): CommandExplanationSummary | null {
+  if (/[\r\n;&|<>]/u.test(params.commandText)) {
+    return null;
+  }
+  const argv = splitShellArgs(params.commandText);
+  if (!argv || argv.length === 0) {
+    return null;
+  }
+  const analysis = analyzeCommandForPolicy({
+    source: "argv",
+    argv,
+    cwd: params.cwd,
+  });
+  return analysis.ok ? summarizeCommandSegmentsForDisplay(analysis.segments) : null;
+}
+
 export function resolveCommandAnalysisSummaryForDisplay(params: {
   host?: string | null;
   commandText: string;
@@ -88,23 +110,24 @@ export function resolveCommandAnalysisSummaryForDisplay(params: {
   sanitizeText?: (value: string) => string;
 }): CommandExplanationSummary | null {
   const analysis =
-    params.host === "node"
-      ? Array.isArray(params.commandArgv) && params.commandArgv.length > 0
-        ? analyzeCommandForPolicy({
-            source: "argv",
-            argv: params.commandArgv,
-            cwd: params.cwd ?? undefined,
-          })
-        : null
-      : analyzeCommandForPolicy({
-          source: "shell",
-          command: params.commandText,
+    params.host === "node" && Array.isArray(params.commandArgv) && params.commandArgv.length > 0
+      ? analyzeCommandForPolicy({
+          source: "argv",
+          argv: params.commandArgv,
+          cwd: params.cwd ?? undefined,
+        })
+      : null;
+  const summary = analysis?.ok
+    ? summarizeCommandSegmentsForDisplay(analysis.segments)
+    : params.host === "node"
+      ? null
+      : summarizeSimpleShellTextForDisplay({
+          commandText: params.commandText,
           cwd: params.cwd ?? undefined,
         });
-  if (!analysis?.ok) {
+  if (!summary) {
     return null;
   }
-  const summary = summarizeCommandSegmentsForDisplay(analysis.segments);
   const sanitizeText = params.sanitizeText;
   if (!sanitizeText) {
     return summary;

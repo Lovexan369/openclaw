@@ -1,9 +1,13 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { APPROVALS_SCOPE, WRITE_SCOPE } from "../gateway/operator-scopes.js";
 import {
+  resolveAllowAlwaysPersistenceDecision,
   requiresExecApproval,
   resolveExecApprovalAllowedDecisions,
+  type ExecAsk,
+  type ExecSecurity,
 } from "../infra/exec-approvals.js";
+import { inspectControlShellCommand } from "../infra/exec-control-shell-policy.js";
 import {
   buildExecApprovalRequesterContext,
   buildExecApprovalTurnSourceContext,
@@ -32,6 +36,24 @@ export type { ExecuteNodeHostCommandParams } from "./bash-tools.exec-host-node.t
 
 const APPROVED_NODE_INVOKE_SCOPES = [WRITE_SCOPE, APPROVALS_SCOPE];
 
+async function resolveNodeControlShellApprovalWarning(params: {
+  command: string;
+  hostSecurity: ExecSecurity;
+  hostAsk: ExecAsk;
+}): Promise<string | undefined> {
+  const decision = await inspectControlShellCommand({ command: params.command });
+  if (decision.kind === "deny") {
+    throw new Error(decision.message);
+  }
+  if (
+    decision.kind !== "requires-approval" ||
+    (params.hostSecurity === "full" && params.hostAsk === "off")
+  ) {
+    return undefined;
+  }
+  return decision.warning;
+}
+
 export async function executeNodeHostCommand(
   params: ExecuteNodeHostCommandParams,
 ): Promise<AgentToolResult<ExecToolDetails>> {
@@ -40,6 +62,11 @@ export async function executeNodeHostCommand(
     security: params.security,
     ask: params.ask,
     host: "node",
+  });
+  const controlShellApprovalWarning = await resolveNodeControlShellApprovalWarning({
+    command: params.command,
+    hostSecurity,
+    hostAsk,
   });
   const target = await resolveNodeExecutionTarget(params);
   if (
@@ -53,6 +80,10 @@ export async function executeNodeHostCommand(
   }
 
   const prepared = await prepareNodeSystemRun({ request: params, target });
+  const requiresControlShellApproval = Boolean(controlShellApprovalWarning);
+  if (controlShellApprovalWarning) {
+    params.warnings.push(controlShellApprovalWarning);
+  }
   const approvalAnalysis = await analyzeNodeApprovalRequirement({
     request: params,
     target,
@@ -62,6 +93,23 @@ export async function executeNodeHostCommand(
   });
   const { analysisOk, allowlistSatisfied, durableApprovalSatisfied, inlineEvalHit } =
     approvalAnalysis;
+  const requiresExplicitApprovalWithoutFallback =
+    inlineEvalHit !== null || requiresControlShellApproval;
+  const allowAlwaysPersistenceDecision = resolveAllowAlwaysPersistenceDecision({
+    commandText: prepared.rawCommand,
+    analysisOk,
+    explicitApprovalOnly: requiresExplicitApprovalWithoutFallback,
+    mutableFileOperand: prepared.plan.mutableFileOperand,
+    segments: approvalAnalysis.segments,
+    authorizationPlan: approvalAnalysis.authorizationPlan,
+    cwd: prepared.cwd,
+    env: target.env,
+    platform: target.platform,
+    strictInlineEval: params.strictInlineEval === true,
+  });
+  const allowedDecisions = allowAlwaysPersistenceDecision.kind === "one-shot"
+    ? (["allow-once", "deny"] as const)
+    : resolveExecApprovalAllowedDecisions({ ask: hostAsk });
   const requiresAsk =
     requiresExecApproval({
       ask: hostAsk,
@@ -69,7 +117,7 @@ export async function executeNodeHostCommand(
       analysisOk,
       allowlistSatisfied,
       durableApprovalSatisfied,
-    }) || inlineEvalHit !== null;
+    }) || requiresExplicitApprovalWithoutFallback;
 
   let inlineApprovedByAsk = false;
   let inlineApprovalDecision: "allow-once" | "allow-always" | null = null;
@@ -92,6 +140,8 @@ export async function executeNodeHostCommand(
         nodeId: target.nodeId,
         security: hostSecurity,
         ask: hostAsk,
+        allowedDecisions,
+        warningText: params.warnings.join("\n").trim() || undefined,
         commandHighlighting: params.commandHighlighting,
         ...buildExecApprovalRequesterContext({
           agentId: prepared.agentId,
@@ -128,7 +178,7 @@ export async function executeNodeHostCommand(
         baseDecision,
         approvedByAsk,
         deniedReason,
-        requiresInlineEvalApproval: inlineEvalHit !== null,
+        requiresInlineEvalApproval: requiresExplicitApprovalWithoutFallback,
       });
       if (strictInlineEvalDecision.deniedReason || !strictInlineEvalDecision.approvedByAsk) {
         throw new Error(
@@ -195,7 +245,7 @@ export async function executeNodeHostCommand(
           baseDecision,
           approvedByAsk,
           deniedReason,
-          requiresInlineEvalApproval: inlineEvalHit !== null,
+          requiresInlineEvalApproval: requiresExplicitApprovalWithoutFallback,
         }));
         if (deniedReason) {
           approvalDecision = null;
@@ -226,7 +276,7 @@ export async function executeNodeHostCommand(
               turnSourceThreadId: params.turnSourceThreadId,
               approved: approvedByAsk,
               approvalDecision:
-                approvalDecision === "allow-always" && inlineEvalHit !== null
+                approvalDecision === "allow-always" && requiresExplicitApprovalWithoutFallback
                   ? "allow-once"
                   : approvalDecision,
               runId: approvalId,
@@ -274,7 +324,7 @@ export async function executeNodeHostCommand(
         initiatingSurface,
         sentApproverDms,
         unavailableReason,
-        allowedDecisions: resolveExecApprovalAllowedDecisions({ ask: hostAsk }),
+        allowedDecisions,
         nodeId: target.nodeId,
       });
     }

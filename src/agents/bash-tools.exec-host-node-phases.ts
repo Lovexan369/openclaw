@@ -10,7 +10,7 @@ import {
   type ExecAsk,
   type ExecSecurity,
   type SystemRunApprovalPlan,
-  evaluateShellAllowlist,
+  evaluateShellAllowlistWithAuthorization as evaluateShellAllowlist,
   hasDurableExecApproval,
   resolveExecApprovalsFromFile,
 } from "../infra/exec-approvals.js";
@@ -48,6 +48,8 @@ type NodeApprovalAnalysis = {
   allowlistSatisfied: boolean;
   durableApprovalSatisfied: boolean;
   inlineEvalHit: InterpreterInlineEvalHit | null;
+  segments: import("../infra/exec-approvals.js").ExecCommandSegment[];
+  authorizationPlan?: import("../infra/exec-approvals.js").ExecAuthorizationPlan;
 };
 
 export function shouldSkipNodeApprovalPrepare(params: {
@@ -311,6 +313,8 @@ export async function analyzeNodeApprovalRequirement(params: {
   let analysisOk = baseAllowlistEval.analysisOk;
   let allowlistSatisfied = false;
   let durableApprovalSatisfied = false;
+  let segments = baseAllowlistEval.segments;
+  let authorizationPlan = baseAllowlistEval.authorizationPlan;
   const inlineEvalHit =
     params.request.strictInlineEval === true
       ? detectPolicyInlineEval(baseAllowlistEval.segments)
@@ -357,6 +361,8 @@ export async function analyzeNodeApprovalRequirement(params: {
         });
         allowlistSatisfied = allowlistEval.allowlistSatisfied;
         analysisOk = allowlistEval.analysisOk;
+        segments = allowlistEval.segments;
+        authorizationPlan = allowlistEval.authorizationPlan;
       }
     } catch {
       // Fall back to requiring approval if node approvals cannot be fetched.
@@ -367,5 +373,7 @@ export async function analyzeNodeApprovalRequirement(params: {
     allowlistSatisfied,
     durableApprovalSatisfied,
     inlineEvalHit,
+    segments,
+    authorizationPlan,
   };
 }

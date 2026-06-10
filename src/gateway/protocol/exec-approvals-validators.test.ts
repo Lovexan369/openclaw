@@ -99,4 +99,20 @@ describe("exec approvals protocol validators", () => {
       }),
     ).toBe(false);
   });
+
+  it("accepts scoped exec approval decision lists", () => {
+    expect(
+      validateExecApprovalRequestParams({
+        command: "echo hi",
+        allowedDecisions: ["allow-once", "deny"],
+      }),
+    ).toBe(true);
+
+    expect(
+      validateExecApprovalRequestParams({
+        command: "echo hi",
+        allowedDecisions: ["allow-once", "bad", "deny"],
+      }),
+    ).toBe(false);
+  });
 });

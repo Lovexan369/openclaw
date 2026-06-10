@@ -2,18 +2,23 @@ import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { __setFsSafeTestHooksForTest } from "@openclaw/fs-safe/test-hooks";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withTempDir } from "../test-utils/temp-dir.js";
 import { testing, createExecTool } from "./bash-tools.exec.js";
+
+const executeNodeHostCommandMock = vi.hoisted(() =>
+  vi.fn(async () => ({
+    content: [{ type: "text" as const, text: "approval pending" }],
+    details: { status: "approval-pending" },
+  })),
+);
 
 vi.mock("./bash-tools.exec-host-gateway.js", () => ({
   processGatewayAllowlist: async () => ({ allowWithoutEnforcedCommand: true }),
 }));
 
 vi.mock("./bash-tools.exec-host-node.js", () => ({
-  executeNodeHostCommand: async () => {
-    throw new Error("node host execution is not used by script preflight tests");
-  },
+  executeNodeHostCommand: executeNodeHostCommandMock,
 }));
 
 vi.mock("../utils/delivery-context.js", () => ({
@@ -31,6 +36,10 @@ const createPreflightTool = () =>
 
 afterEach(() => {
   __setFsSafeTestHooksForTest();
+});
+
+beforeEach(() => {
+  executeNodeHostCommandMock.mockClear();
 });
 
 async function expectSymlinkSwapDuringPreflightToAvoidErrors(params: {
@@ -108,6 +117,33 @@ describe("exec interactive OpenClaw channel login guard", () => {
         command: "env -S 'openclaw channels' login --channel whatsapp",
       }),
     ).rejects.toThrow(/exec cannot run interactive OpenClaw channel login commands/);
+  });
+});
+
+describe("exec control shell approval guard", () => {
+  it("rejects approval commands before gateway execution", async () => {
+    const tool = createExecTool({ host: "gateway", security: "full", ask: "off" });
+
+    await expect(
+      tool.execute("call-approve", {
+        command: "sh -c '/approve abc123 allow-once'",
+      }),
+    ).rejects.toThrow(/exec cannot run \/approve commands/);
+  });
+
+  it("routes node suppression edits through the node approval path", async () => {
+    const tool = createExecTool({ host: "node", security: "full", ask: "on-miss" });
+
+    const result = await tool.execute("call-suppression-edit", {
+      command: "openclaw config set security.audit.suppressions '[]'",
+    });
+
+    expect(result.details?.status).toBe("approval-pending");
+    expect(executeNodeHostCommandMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: "openclaw config set security.audit.suppressions '[]'",
+      }),
+    );
   });
 });
 

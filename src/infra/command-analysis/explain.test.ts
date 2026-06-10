@@ -59,7 +59,7 @@ describe("command-analysis explanation summary", () => {
     ).toBeNull();
   });
 
-  it("resolves gateway display summaries from shell text even when argv is stale", () => {
+  it("resolves gateway display summaries from simple shell text even when argv is stale", () => {
     const summary = resolveCommandAnalysisSummaryForDisplay({
       host: "gateway",
       commandText: "python3 -c 'print(1)'",
@@ -83,5 +83,11 @@ describe("command-analysis explanation summary", () => {
         sanitizeText: (value) => value.replaceAll("python3", "python"),
       })?.warningLines,
     ).toEqual(["Contains inline-eval: python -c"]);
+    expect(
+      resolveCommandAnalysisSummaryForDisplay({
+        host: "gateway",
+        commandText: "python3 -c 'print(1)'",
+      })?.warningLines,
+    ).toEqual(["Contains inline-eval: python3 -c"]);
   });
 });

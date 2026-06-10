@@ -28,6 +28,13 @@ const callGatewayToolMock = vi.hoisted(() => vi.fn());
 const listNodesMock = vi.hoisted(() => vi.fn());
 const parsePreparedSystemRunPayloadMock = vi.hoisted(() => vi.fn());
 const requiresExecApprovalMock = vi.hoisted(() => vi.fn(() => true));
+const resolveAllowAlwaysPersistenceDecisionMock = vi.hoisted(() =>
+  vi.fn((params: { commandText?: string; explicitApprovalOnly?: boolean }) =>
+    params.explicitApprovalOnly === true
+      ? { kind: "one-shot" as const, reasons: ["explicit-approval-only"] }
+      : { kind: "exact-command" as const, commandText: params.commandText ?? "bun ./script.ts" },
+  ),
+);
 const resolveExecHostApprovalContextMock = vi.hoisted(() =>
   vi.fn(() => ({
     approvals: { allowlist: [], file: { version: 1, agents: {} } },
@@ -83,8 +90,16 @@ vi.mock("../infra/exec-approvals.js", () => ({
     segments: [{ resolution: null, argv: ["bun", "./script.ts"] }],
     segmentAllowlistEntries: [],
   })),
+  evaluateShellAllowlistWithAuthorization: vi.fn(() => ({
+    allowlistMatches: [],
+    analysisOk: true,
+    allowlistSatisfied: false,
+    segments: [{ resolution: null, argv: ["bun", "./script.ts"] }],
+    segmentAllowlistEntries: [],
+  })),
   hasDurableExecApproval: vi.fn(() => false),
   requiresExecApproval: requiresExecApprovalMock,
+  resolveAllowAlwaysPersistenceDecision: resolveAllowAlwaysPersistenceDecisionMock,
   resolveExecApprovalAllowedDecisions: vi.fn(() => ["allow-once", "allow-always", "deny"]),
   resolveExecApprovalsFromFile: vi.fn(() => ({
     allowlist: [],
@@ -257,6 +272,7 @@ describe("executeNodeHostCommand", () => {
     parsePreparedSystemRunPayloadMock.mockReturnValue({ plan: preparedPlan });
     requiresExecApprovalMock.mockReset();
     requiresExecApprovalMock.mockReturnValue(true);
+    resolveAllowAlwaysPersistenceDecisionMock.mockClear();
     resolveExecHostApprovalContextMock.mockReset();
     resolveExecHostApprovalContextMock.mockReturnValue({
       approvals: { allowlist: [], file: { version: 1, agents: {} } },
@@ -350,6 +366,87 @@ describe("executeNodeHostCommand", () => {
     expect(runParams.turnSourceTo).toBe("telegram:12345");
     expect(runParams.turnSourceAccountId).toBe("work");
     expect(runParams.turnSourceThreadId).toBe("42");
+  });
+
+  it("requires one-shot approval for control-shell node commands", async () => {
+    requiresExecApprovalMock.mockReturnValue(false);
+    resolveExecHostApprovalContextMock.mockReturnValue({
+      approvals: { allowlist: [], file: { version: 1, agents: {} } },
+      hostSecurity: "full",
+      hostAsk: "on-miss",
+      askFallback: "deny",
+    });
+
+    const result = await executeNodeHostCommand({
+      command: "openclaw config set security.audit.suppressions '[]'",
+      workdir: "/tmp/work",
+      env: {},
+      security: "full",
+      ask: "on-miss",
+      defaultTimeoutSec: 30,
+      approvalRunningNoticeMs: 0,
+      warnings: [],
+      agentId: "requested-agent",
+      sessionKey: "requested-session",
+    });
+
+    expect(result.details?.status).toBe("approval-pending");
+    expect(buildExecApprovalPendingToolResultMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowedDecisions: ["allow-once", "deny"],
+      }),
+    );
+    expect(requireRegisteredApprovalRequest()).toEqual(
+      expect.objectContaining({
+        allowedDecisions: ["allow-once", "deny"],
+        warningText:
+          "Warning: security audit suppression changes require explicit approval unless exec is running in yolo mode.",
+      }),
+    );
+
+    await vi.waitFor(() => {
+      const call = requireGatewayCommand("system.run");
+      const runParams = requireRunParams(call);
+      expect(runParams.approved).toBe(true);
+      expect(runParams.approvalDecision).toBe("allow-once");
+    });
+  });
+
+  it("requires control-shell approval after node policy overrides", async () => {
+    requiresExecApprovalMock.mockReturnValue(false);
+    resolveExecHostApprovalContextMock.mockReturnValue({
+      approvals: { allowlist: [], file: { version: 1, agents: {} } },
+      hostSecurity: "full",
+      hostAsk: "on-miss",
+      askFallback: "deny",
+    });
+
+    const result = await executeNodeHostCommand({
+      command: "openclaw config set security.audit.suppressions '[]'",
+      workdir: "/tmp/work",
+      env: {},
+      security: "full",
+      ask: "off",
+      defaultTimeoutSec: 30,
+      approvalRunningNoticeMs: 0,
+      warnings: [],
+      agentId: "requested-agent",
+      sessionKey: "requested-session",
+    });
+
+    expect(result.details?.status).toBe("approval-pending");
+    expect(buildExecApprovalPendingToolResultMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowedDecisions: ["allow-once", "deny"],
+      }),
+    );
+    expect(requireRegisteredApprovalRequest()).toEqual(
+      expect.objectContaining({
+        allowedDecisions: ["allow-once", "deny"],
+        warningText:
+          "Warning: security audit suppression changes require explicit approval unless exec is running in yolo mode.",
+      }),
+    );
   });
 
   it("builds a local systemRunPlan when approval is required and the node omits prepare", async () => {

@@ -13,9 +13,15 @@ import { resolveAllowAlwaysPatternEntries } from "./exec-approvals-allowlist.js"
 import type { ExecCommandSegment } from "./exec-approvals-analysis.js";
 import type { ExecAllowlistEntry } from "./exec-approvals.types.js";
 import type { ExecAuthorizationPlan } from "./exec-authorization-plan.js";
+import {
+  extractShellWrapperCommand,
+  normalizeExecutableToken,
+  POSIX_SHELL_WRAPPERS,
+} from "./exec-wrapper-resolution.js";
 import { assertNoSymlinkParentsSync } from "./fs-safe-advanced.js";
 import { expandHomePrefix, resolveRequiredHomeDir } from "./home-dir.js";
 import { requestJsonlSocket } from "./jsonl-socket.js";
+import { POSIX_INLINE_COMMAND_FLAGS, resolveInlineCommandMatch } from "./shell-inline-command.js";
 export * from "./exec-approvals-analysis.js";
 export * from "./exec-approvals-allowlist.js";
 export type { ExecAuthorizationPlan } from "./exec-authorization-plan.js";
@@ -1195,6 +1201,147 @@ export function addDurableCommandApproval(
   });
 }
 
+type PersistedAllowAlwaysPattern = ReturnType<typeof resolveAllowAlwaysPatternEntries>[number];
+
+export type AllowAlwaysPersistenceDecision =
+  | { kind: "patterns"; patterns: PersistedAllowAlwaysPattern[] }
+  | { kind: "exact-command"; commandText: string }
+  | { kind: "one-shot"; reasons: string[] };
+
+const POSIX_SHELL_WRAPPER_NAMES: ReadonlySet<string> = new Set(POSIX_SHELL_WRAPPERS);
+
+function hasRuntimePayloadExpansion(command: string): boolean {
+  return /(^|[^\\])(?:`|\$\(|\$\{|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@*#?$!-])/.test(command);
+}
+
+function hasShellStartupFileOption(argv: readonly string[]): boolean {
+  return argv.some(
+    (token) =>
+      token === "--rcfile" ||
+      token === "--init-file" ||
+      token.startsWith("--rcfile=") ||
+      token.startsWith("--init-file="),
+  );
+}
+
+function resolveStaticPosixShellInlineCommand(argv: string[]): string | null {
+  const executable = normalizeExecutableToken(argv[0] ?? "");
+  if (!POSIX_SHELL_WRAPPER_NAMES.has(executable) || hasShellStartupFileOption(argv)) {
+    return null;
+  }
+  const match = resolveInlineCommandMatch(argv, POSIX_INLINE_COMMAND_FLAGS, {
+    allowCombinedC: true,
+  });
+  const command = match.command?.trim() ?? "";
+  return command.length > 0 ? command : null;
+}
+
+function resolveExactCommandFallbackReason(
+  authorizationPlan: ExecAuthorizationPlan | undefined,
+): string | null {
+  if (!authorizationPlan?.ok) {
+    return "analysis-unavailable";
+  }
+
+  let hasExactCommandCandidate = false;
+  for (const group of authorizationPlan.groups) {
+    for (const candidate of group.candidates) {
+      if (candidate.trustMode === "prompt-only") {
+        return candidate.reasons[0] ?? "prompt-only";
+      }
+      const shellWrapperCommand =
+        extractShellWrapperCommand(candidate.sourceSegment.argv).command ??
+        resolveStaticPosixShellInlineCommand(candidate.sourceSegment.argv);
+      if (shellWrapperCommand) {
+        if (hasRuntimePayloadExpansion(shellWrapperCommand)) {
+          return "runtime-payload";
+        }
+        hasExactCommandCandidate = true;
+      }
+      if (candidate.transport.kind === "shell-wrapper") {
+        if (hasRuntimePayloadExpansion(candidate.transport.inlineCommand)) {
+          return "runtime-payload";
+        }
+        hasExactCommandCandidate = true;
+      }
+      if (candidate.trustMode !== "exact-command") {
+        continue;
+      }
+      hasExactCommandCandidate = true;
+    }
+  }
+
+  return hasExactCommandCandidate ? null : "no-exact-command-candidate";
+}
+
+export function resolveAllowAlwaysPersistenceDecision(params: {
+  commandText: string;
+  analysisOk: boolean;
+  explicitApprovalOnly?: boolean;
+  mutableFileOperand?: SystemRunApprovalFileOperand | null;
+  segments: ExecCommandSegment[];
+  authorizationPlan?: ExecAuthorizationPlan;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  platform?: string | null;
+  strictInlineEval?: boolean;
+}): AllowAlwaysPersistenceDecision {
+  if (params.explicitApprovalOnly === true) {
+    return { kind: "one-shot", reasons: ["explicit-approval-only"] };
+  }
+  if (params.mutableFileOperand != null) {
+    return { kind: "one-shot", reasons: ["mutable-file-payload"] };
+  }
+  if (!params.analysisOk) {
+    return { kind: "one-shot", reasons: ["analysis-unavailable"] };
+  }
+
+  const patterns = resolveAllowAlwaysPatternEntries({
+    segments: params.segments,
+    authorizationPlan: params.authorizationPlan,
+    cwd: params.cwd,
+    env: params.env,
+    platform: params.platform,
+    strictInlineEval: params.strictInlineEval,
+  });
+  if (patterns.length > 0) {
+    return { kind: "patterns", patterns };
+  }
+
+  const exactFallbackReason = resolveExactCommandFallbackReason(params.authorizationPlan);
+  if (exactFallbackReason) {
+    return { kind: "one-shot", reasons: [exactFallbackReason] };
+  }
+
+  const commandText = params.commandText.trim();
+  if (!commandText) {
+    return { kind: "one-shot", reasons: ["empty-command"] };
+  }
+  return { kind: "exact-command", commandText };
+}
+
+export function persistAllowAlwaysDecision(params: {
+  approvals: ExecApprovalsFile;
+  agentId: string | undefined;
+  decision: AllowAlwaysPersistenceDecision;
+}) {
+  if (params.decision.kind === "patterns") {
+    for (const pattern of params.decision.patterns) {
+      if (!pattern.pattern) {
+        continue;
+      }
+      addAllowlistEntry(params.approvals, params.agentId, pattern.pattern, {
+        argPattern: pattern.argPattern,
+        source: "allow-always",
+      });
+    }
+    return;
+  }
+  if (params.decision.kind === "exact-command") {
+    addDurableCommandApproval(params.approvals, params.agentId, params.decision.commandText);
+  }
+}
+
 export function persistAllowAlwaysPatterns(params: {
   approvals: ExecApprovalsFile;
   agentId: string | undefined;
@@ -1256,13 +1403,18 @@ export function resolveExecApprovalRequestAllowedDecisions(params?: {
   ask?: string | null;
   allowedDecisions?: readonly ExecApprovalDecision[] | readonly string[] | null;
 }): readonly ExecApprovalDecision[] {
+  const allowedByAsk = resolveExecApprovalAllowedDecisions({ ask: params?.ask });
   const explicit = Array.isArray(params?.allowedDecisions)
     ? params.allowedDecisions.filter(
         (decision): decision is ExecApprovalDecision =>
           decision === "allow-once" || decision === "allow-always" || decision === "deny",
       )
     : [];
-  return explicit.length > 0 ? explicit : resolveExecApprovalAllowedDecisions({ ask: params?.ask });
+  if (explicit.length === 0) {
+    return allowedByAsk;
+  }
+  const narrowed = explicit.filter((decision) => allowedByAsk.includes(decision));
+  return narrowed.length > 0 ? narrowed : allowedByAsk;
 }
 
 export function isExecApprovalDecisionAllowed(params: {

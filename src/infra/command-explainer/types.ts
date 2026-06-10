@@ -77,6 +77,7 @@ export type CommandRisk =
       text: string;
       span: SourceSpan;
     }
+  | { kind: "env-assignment"; name: string; text: string; span: SourceSpan }
   | { kind: "eval"; text: string; span: SourceSpan }
   | { kind: "source"; command: string; text: string; span: SourceSpan }
   | { kind: "alias"; text: string; span: SourceSpan }

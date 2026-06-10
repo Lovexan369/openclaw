@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { analyzeArgvCommand } from "./exec-approvals-analysis.js";
 import { planExecAuthorization, planShellAuthorization } from "./exec-authorization-plan.js";
@@ -9,6 +13,13 @@ function plannedArgv(plan: Awaited<ReturnType<typeof planShellAuthorization>>): 
         group.candidates.map((candidate) => candidate.sourceSegment.argv),
       )
     : [];
+}
+
+function makeExecutable(dir: string, name: string): string {
+  const file = path.join(dir, name);
+  fs.writeFileSync(file, "");
+  fs.chmodSync(file, 0o755);
+  return fs.realpathSync(file);
 }
 
 describe("exec authorization planner", () => {
@@ -81,6 +92,7 @@ describe("exec authorization planner", () => {
     { command: "echo $(whoami)", reason: "command-substitution" },
     { command: "echo `whoami`", reason: "command-substitution" },
     { command: "cat <(echo ok)", reason: "process-substitution" },
+    { command: "myfunc(){ echo pwn; }; myfunc", reason: "function-definition" },
     { command: "echo $HOME", reason: "dynamic-argument" },
   ])("treats $reason as unanalyzable shell topology", async ({ command, reason }) => {
     const plan = await planShellAuthorization({ command });
@@ -147,7 +159,28 @@ describe("exec authorization planner", () => {
               kind: "shell-wrapper",
               wrapperSegment: expect.objectContaining({ argv: ["sh", "-c", "git status"] }),
               wrapperArgv: ["sh", "-c", "git status"],
+              wrapperPrefix: "",
               inlineCommand: "git status",
+            }),
+            trustMode: "executable",
+          }),
+        ],
+      }),
+    ]);
+  });
+
+  it("keeps current wrapper behavior for path-scoped shell wrappers", async () => {
+    const plan = await planShellAuthorization({ command: "./sh -c 'git status'" });
+
+    expect(plan.ok).toBe(true);
+    expect(plan.groups).toEqual([
+      expect.objectContaining({
+        candidates: [
+          expect.objectContaining({
+            sourceSegment: expect.objectContaining({ argv: ["git", "status"] }),
+            transport: expect.objectContaining({
+              kind: "shell-wrapper",
+              wrapperArgv: ["./sh", "-c", "git status"],
             }),
             trustMode: "executable",
           }),
@@ -214,6 +247,30 @@ describe("exec authorization planner", () => {
     ]);
   });
 
+  it.each([
+    { command: "BASH_ENV=/tmp/pwn bash -c 'echo ok'", reason: "env-assignment" },
+    { command: "FOO=$(id) bash -c 'echo ok'", reason: "command-substitution" },
+  ])(
+    "keeps shell-wrapper fallback prompt-only with risky prelude: $command",
+    async ({ command, reason }) => {
+      const plan = await planShellAuthorization({ command });
+
+      expect(plan.ok).toBe(true);
+      expect(plan.groups).toEqual([
+        expect.objectContaining({
+          candidates: [
+            expect.objectContaining({
+              sourceSegment: expect.objectContaining({ argv: ["bash", "-c", "echo ok"] }),
+              transport: { kind: "direct" },
+              trustMode: "prompt-only",
+              reasons: [reason],
+            }),
+          ],
+        }),
+      ]);
+    },
+  );
+
   it("falls back to the wrapper command when argv inline payloads use line continuations", async () => {
     const inlineCommand = ["git \\", "status"].join("\n");
     const analysis = analyzeArgvCommand({ argv: ["/bin/sh", "-c", inlineCommand] });
@@ -262,6 +319,27 @@ describe("exec authorization planner", () => {
           expect.objectContaining({
             sourceSegment: expect.objectContaining({
               argv: ["sh", "-c", "git status && ./scripts/run.sh"],
+            }),
+            transport: { kind: "direct" },
+            trustMode: "exact-command",
+          }),
+        ],
+      }),
+    ]);
+  });
+
+  it("does not promote shell-wrapper payloads with control flow", async () => {
+    const plan = await planShellAuthorization({
+      command: "sh -c 'if git diff --quiet; then git clean -fd; fi'",
+    });
+
+    expect(plan.ok).toBe(true);
+    expect(plan.groups).toEqual([
+      expect.objectContaining({
+        candidates: [
+          expect.objectContaining({
+            sourceSegment: expect.objectContaining({
+              argv: ["sh", "-c", "if git diff --quiet; then git clean -fd; fi"],
             }),
             transport: { kind: "direct" },
             trustMode: "exact-command",
@@ -329,7 +407,7 @@ describe("exec authorization planner", () => {
   });
 
   it("plans argv shell wrappers through the same candidate contract", async () => {
-    const analysis = analyzeArgvCommand({ argv: ["/bin/zsh", "-c", "whoami && ls"] });
+    const analysis = analyzeArgvCommand({ argv: ["sh", "-c", "whoami && ls"] });
     const plan = await planExecAuthorization({ analysis });
 
     expect(plan.ok).toBe(true);
@@ -384,7 +462,141 @@ describe("exec authorization planner", () => {
     expect(rendered.command).toContain("rg foo src/*.ts");
     expect(rendered.command).toContain("|");
     expect(rendered.command).toContain("&&");
-    expect(rendered.command).toMatch(/'head' '-n' '5'|'[^']+\/head' '-n' '5'/);
+    expect(rendered.command).toMatch(/\| '(?:\S+\/)?head' '-n' '5' &&/);
+  });
+
+  it("fails closed when render metadata does not match the plan candidates", async () => {
+    const plan = await planShellAuthorization({
+      command: "rg foo src/*.ts | head -n 5",
+    });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "safeBins",
+      segmentSatisfiedBy: ["safeBins"],
+    });
+
+    expect(rendered).toEqual({ ok: false, reason: "segment metadata mismatch" });
+  });
+
+  it("renders enforced POSIX commands with literal argv", async () => {
+    const plan = await planShellAuthorization({ command: "head -c 16 package.json" });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "enforced",
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    expect(rendered.command).toMatch(/^'(?:\S+\/)?head' '-c' '16' 'package\.json'$/);
+  });
+
+  it("pins POSIX executables while preserving shell-expanded arguments", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-exec-render-"));
+    const git = makeExecutable(dir, "git");
+    const plan = await planShellAuthorization({
+      command: "git -C ~/repo status",
+      env: { PATH: dir },
+    });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "executable",
+      segmentSatisfiedBy: ["allowlist"],
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    expect(rendered.command).toBe(`${git} -C ~/repo status`);
+  });
+
+  it("quotes forced allowlist argument matches in executable mode", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-exec-render-"));
+    makeExecutable(dir, "tool");
+    const plan = await planShellAuthorization({
+      command: "tool *.txt",
+      env: { PATH: dir },
+    });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "executable",
+      segmentSatisfiedBy: ["allowlist"],
+      forceRewriteSegments: [true],
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    expect(rendered.command).toContain("'*.txt'");
+  });
+
+  it("renders transparent dispatch wrappers from the full planned argv", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-exec-render-"));
+    const git = makeExecutable(dir, "git");
+    const plan = await planShellAuthorization({
+      command: "env git status",
+      env: { PATH: dir },
+    });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "enforced",
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    expect(rendered.command).toBe(`'${git}' 'status'`);
+    expect(rendered.command).not.toContain(`${git} git status`);
+  });
+
+  it("preserves leading env assignments while enforcing executable paths", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-exec-render-"));
+    const git = makeExecutable(dir, "git");
+    const plan = await planShellAuthorization({
+      command: "FOO=1 git status",
+      env: { PATH: dir },
+    });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "enforced",
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    expect(rendered.command).toBe(`FOO=1 '${git}' 'status'`);
+  });
+
+  it("preserves declaration command arguments while enforcing executable paths", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-exec-render-"));
+    const echo = makeExecutable(dir, "echo");
+    const plan = await planShellAuthorization({
+      command: "export FOO=bar; echo ok",
+      env: { PATH: dir },
+    });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "enforced",
+      segmentSatisfiedBy: ["allowlist", "allowlist"],
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    expect(rendered.command).toBe(`'export' 'FOO=bar'; '${echo}' 'ok'`);
   });
 
   it("renders shell-wrapper payloads by replacing the wrapper inline command", async () => {
@@ -393,17 +605,104 @@ describe("exec authorization planner", () => {
     const rendered = buildAuthorizedShellCommandFromPlan({
       plan,
       mode: "safeBins",
-      segmentSatisfiedBy: ["inlineChain"],
+      segmentSatisfiedBy: [null, "safeBins"],
     });
 
     expect(rendered).toEqual(expect.objectContaining({ ok: true }));
     if (!rendered.ok) {
       throw new Error(rendered.reason);
     }
-    expect(rendered.command).toContain("'sh'");
-    expect(rendered.command).toContain("'-c'");
+    expect(rendered.command).toMatch(/^'?sh'? '?-c'? /);
     expect(rendered.command).not.toContain("git status && head -c 16");
+    expect(rendered.command).toContain("git status &&");
     expect(rendered.command).toContain("head");
+    expect(rendered.command).toContain("-c");
+    expect(rendered.command).not.toContain("'git'");
+  });
+
+  it("preserves attached shell command flags when rendering wrappers", async () => {
+    const plan = await planShellAuthorization({ command: "sh -c'echo ok'" });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "enforced",
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    expect(rendered.command).toContain("'-c'");
+    const output = execFileSync("/bin/sh", ["-c", rendered.command], { encoding: "utf8" });
+    expect(output.trim()).toBe("ok");
+  });
+
+  it("renders shell-wrapper payloads when resolved executable paths need quotes", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw exec render "));
+    const git = path.join(dir, "git");
+    fs.writeFileSync(git, '#!/bin/sh\necho git-ran "$@"\n');
+    fs.chmodSync(git, 0o755);
+    const plan = await planShellAuthorization({
+      command: "sh -c 'git status'",
+      env: { PATH: `${dir}${path.delimiter}${process.env.PATH ?? ""}` },
+    });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "enforced",
+      segmentSatisfiedBy: ["allowlist"],
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    const output = execFileSync("/bin/sh", ["-c", rendered.command], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH ?? ""}` },
+    });
+    expect(output.trim()).toBe("git-ran status");
+  });
+
+  it("preserves shell-wrapper payload env assignments while enforcing executable paths", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-exec-render-"));
+    const git = makeExecutable(dir, "git");
+    const plan = await planShellAuthorization({
+      command: "/bin/sh -c 'FOO=bar git status'",
+      env: { PATH: dir },
+    });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "enforced",
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    expect(rendered.command).toContain("FOO=bar ");
+    expect(rendered.command).toContain(git);
+    expect(rendered.command).toContain("status");
+  });
+
+  it("preserves leading env assignments before shell wrappers while enforcing payloads", async () => {
+    const plan = await planShellAuthorization({
+      command: "FOO=bar sh -c 'printenv FOO'",
+    });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "enforced",
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    expect(rendered.command).toMatch(/^FOO=bar '?sh'? '?-c'? /);
+    const output = execFileSync("/bin/sh", ["-c", rendered.command], { encoding: "utf8" });
+    expect(output.trim()).toBe("bar");
   });
 
   it("preserves background operators while rendering rewritten commands", async () => {
@@ -420,6 +719,48 @@ describe("exec authorization planner", () => {
       throw new Error(rendered.reason);
     }
     expect(rendered.command).toContain(" & ");
-    expect(rendered.command).toMatch(/'head' '-n' '5'|'[^']+\/head' '-n' '5'/);
+    expect(rendered.command).toMatch(/& '(?:\S+\/)?head' '-n' '5'/);
+  });
+
+  it("renders safe-bin rewrites with literal argv", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-exec-safe-render-"));
+    const tr = path.join(dir, "tr");
+    fs.writeFileSync(tr, '#!/bin/sh\nprintf "%s\\n" "$#|$1|$2|$3"\n');
+    fs.chmodSync(tr, 0o755);
+    const plan = await planShellAuthorization({
+      command: "tr a{b,c} x",
+      env: { PATH: dir },
+    });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "safeBins",
+      segmentSatisfiedBy: ["safeBins"],
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    const output = execFileSync("/bin/sh", ["-c", rendered.command], { encoding: "utf8" });
+    expect(output.trim()).toBe("2|a{b,c}|x|");
+  });
+
+  it("preserves decoded shell-wrapper newline operators while rendering rewritten commands", async () => {
+    const plan = await planShellAuthorization({
+      command: String.raw`sh -c $'git status\necho ok'`,
+    });
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan,
+      mode: "enforced",
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    expect(rendered.command).toContain(";");
+    expect(rendered.command).not.toContain("|");
   });
 });

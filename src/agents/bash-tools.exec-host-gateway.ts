@@ -2,17 +2,21 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { describeInterpreterInlineEval } from "../infra/command-analysis/inline-eval.js";
 import { detectPolicyInlineEval } from "../infra/command-analysis/policy.js";
 import {
-  addDurableCommandApproval,
+  buildEnforcedShellCommand,
+  type ExecApprovalDecision,
+  type ExecAllowlistEntry,
   type ExecAsk,
+  resolveAllowAlwaysPersistenceDecision,
   resolveExecApprovalAllowedDecisions,
   type ExecSecurity,
-  evaluateShellAllowlist,
+  evaluateShellAllowlistWithAuthorization as evaluateShellAllowlist,
   hasDurableExecApproval,
-  persistAllowAlwaysPatterns,
+  persistAllowAlwaysDecision,
   recordAllowlistMatchesUse,
   resolveApprovalAuditTrustPath,
   requiresExecApproval,
 } from "../infra/exec-approvals.js";
+import { isWindowsPlatform } from "../infra/exec-approvals-analysis.js";
 import { buildAuthorizedShellCommandFromPlan } from "../infra/exec-authorization-render.js";
 import { inspectControlShellCommand } from "../infra/exec-control-shell-policy.js";
 import type { SafeBinProfile } from "../infra/exec-safe-bin-policy.js";
@@ -47,6 +51,10 @@ import type {
   ExecApprovalFollowupOutcome,
   ExecToolDetails,
 } from "./bash-tools.exec-types.js";
+
+function allowlistEntryHasArgPattern(entry: ExecAllowlistEntry | null): boolean {
+  return typeof entry?.argPattern === "string" && entry.argPattern.trim().length > 0;
+}
 
 export type ProcessGatewayAllowlistParams = {
   command: string;
@@ -308,14 +316,21 @@ export async function processGatewayAllowlist(
     const enforced = allowlistEval.authorizationPlan
       ? buildAuthorizedShellCommandFromPlan({
           plan: allowlistEval.authorizationPlan,
-          mode: "enforced",
+          mode: "executable",
           segmentSatisfiedBy: allowlistEval.segmentSatisfiedBy,
+          forceRewriteSegments: allowlistEval.segmentAllowlistEntries.map(
+            allowlistEntryHasArgPattern,
+          ),
         })
-      : { ok: false as const, reason: "authorization plan unavailable" };
+      : isWindowsPlatform(process.platform)
+        ? buildEnforcedShellCommand({
+            command: params.command,
+            segments: allowlistEval.segments,
+            platform: process.platform,
+          })
+        : { ok: false, reason: "authorization plan unavailable" };
     if (!enforced.ok) {
-      allowlistPlanUnavailableReason = enforced.reason;
-    } else if (!enforced.command) {
-      allowlistPlanUnavailableReason = "unsupported platform";
+      allowlistPlanUnavailableReason = enforced.reason ?? "authorization plan unavailable";
     } else {
       enforcedCommand = enforced.command;
     }
@@ -350,6 +365,23 @@ export async function processGatewayAllowlist(
   const requiresControlShellApproval =
     controlShellDecision.kind === "requires-approval" &&
     !(hostSecurity === "full" && hostAsk === "off");
+  const requiresExplicitApprovalWithoutFallback =
+    requiresInlineEvalApproval || requiresControlShellApproval;
+  const allowAlwaysPersistenceDecision = resolveAllowAlwaysPersistenceDecision({
+    commandText: params.command,
+    analysisOk,
+    explicitApprovalOnly: requiresExplicitApprovalWithoutFallback,
+    segments: allowlistEval.segments,
+    authorizationPlan: allowlistEval.authorizationPlan,
+    cwd: params.workdir,
+    env: params.env,
+    platform: process.platform,
+    strictInlineEval: params.strictInlineEval === true,
+  });
+  const allowedDecisions: readonly ExecApprovalDecision[] =
+    allowAlwaysPersistenceDecision.kind === "one-shot"
+    ? ["allow-once", "deny"]
+    : resolveExecApprovalAllowedDecisions({ ask: hostAsk });
   if (requiresControlShellApproval) {
     params.warnings.push(controlShellDecision.warning);
   }
@@ -393,6 +425,7 @@ export async function processGatewayAllowlist(
         host: "gateway",
         security: hostSecurity,
         ask: hostAsk,
+        allowedDecisions,
         commandHighlighting: params.commandHighlighting,
         warningText: params.warnings.join("\n").trim() || undefined,
         ...buildExecApprovalRequesterContext({
@@ -433,7 +466,7 @@ export async function processGatewayAllowlist(
         baseDecision,
         approvedByAsk,
         deniedReason,
-        requiresInlineEvalApproval,
+        requiresInlineEvalApproval: requiresExplicitApprovalWithoutFallback,
       });
 
       if (strictInlineEvalDecision.deniedReason || !strictInlineEvalDecision.approvedByAsk) {
@@ -511,28 +544,18 @@ export async function processGatewayAllowlist(
         approvedByAsk = true;
       } else if (decision === "allow-always") {
         approvedByAsk = true;
-        if (!requiresInlineEvalApproval) {
-          const patterns = persistAllowAlwaysPatterns({
-            approvals: approvals.file,
-            agentId: params.agentId,
-            segments: allowlistEval.segments,
-            authorizationPlan: allowlistEval.authorizationPlan,
-            cwd: params.workdir,
-            env: params.env,
-            platform: process.platform,
-            strictInlineEval: params.strictInlineEval === true,
-          });
-          if (patterns.length === 0) {
-            addDurableCommandApproval(approvals.file, params.agentId, params.command);
-          }
-        }
+        persistAllowAlwaysDecision({
+          approvals: approvals.file,
+          agentId: params.agentId,
+          decision: allowAlwaysPersistenceDecision,
+        });
       }
 
       ({ approvedByAsk, deniedReason } = enforceStrictInlineEvalApprovalBoundary({
         baseDecision,
         approvedByAsk,
         deniedReason,
-        requiresInlineEvalApproval,
+        requiresInlineEvalApproval: requiresExplicitApprovalWithoutFallback,
       }));
 
       if (
@@ -620,7 +643,7 @@ export async function processGatewayAllowlist(
         initiatingSurface,
         sentApproverDms,
         unavailableReason,
-        allowedDecisions: resolveExecApprovalAllowedDecisions({ ask: hostAsk }),
+        allowedDecisions,
       }),
     };
   }

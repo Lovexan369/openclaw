@@ -1471,6 +1471,10 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
         command: ["python3", "-c", "print('hi')"],
         expected: "python3 -c requires explicit approval in strictInlineEval mode",
       },
+      {
+        command: ["sh", "-c", 'python3 -c "$(cat /tmp/payload.py)"'],
+        expected: "python3 -c requires explicit approval in strictInlineEval mode",
+      },
     ] as const;
     setRuntimeConfigSnapshot({
       tools: {
@@ -1562,6 +1566,28 @@ describe("handleSystemRunInvoke mac app exec host routing", () => {
     } finally {
       clearRuntimeConfigSnapshot();
     }
+  });
+
+  it("does not persist exact-command trust for runtime shell payloads", async () => {
+    await withTempApprovalsHome({
+      approvals: createAllowlistOnMissApprovals(),
+      run: async () => {
+        const { runCommand, sendInvokeResult } = await runSystemInvoke({
+          preferMacAppExecHost: false,
+          command: ["sh", "-c", "$SCRIPT"],
+          env: { SCRIPT: "echo from-env" },
+          security: "allowlist",
+          ask: "on-miss",
+          approvalDecision: "allow-always",
+          approved: true,
+          runCommand: vi.fn(async () => createLocalRunResult("runtime-payload-ok")),
+        });
+
+        expect(runCommand).toHaveBeenCalledTimes(1);
+        expectInvokeOk(sendInvokeResult, { payloadContains: "runtime-payload-ok" });
+        expect(loadExecApprovals().agents?.main?.allowlist ?? []).toStrictEqual([]);
+      },
+    });
   });
 
   it("persists benign awk allow-always approvals in strict inline-eval mode without reopening inline carriers", async () => {

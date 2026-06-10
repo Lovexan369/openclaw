@@ -10,7 +10,6 @@ export type ControlShellPolicyDecision =
 export type ControlShellParsedSegment = {
   argv: string[];
   raw?: string;
-  expandPayloadCandidates?: boolean;
 };
 
 type ControlShellCandidate = {
@@ -18,15 +17,14 @@ type ControlShellCandidate = {
   raw: string;
 };
 
-type ControlShellInspection = {
-  candidates: ControlShellCandidate[];
-  heredocTexts: string[];
-  redirectTargets: string[];
-};
-
 const INTERACTIVE_CHANNEL_LOGIN_DENY_MESSAGE = [
   "exec cannot run interactive OpenClaw channel login commands.",
   "Run `openclaw channels login` in a terminal on the gateway host, or use the channel-specific login agent tool when available (for WhatsApp: `whatsapp_login`).",
+].join(" ");
+
+const EXEC_APPROVAL_DENY_MESSAGE = [
+  "exec cannot run /approve commands.",
+  "Show the /approve command to the user as chat text, or route it through the approval command handler instead of shell execution.",
 ].join(" ");
 
 const SECURITY_AUDIT_SUPPRESSION_WARNING =
@@ -34,564 +32,29 @@ const SECURITY_AUDIT_SUPPRESSION_WARNING =
 
 const SSH_FILE_READ_WARNING = "Warning: Reading SSH files requires explicit approval.";
 
-const CONTROL_OPTION_FLAGS_WITH_VALUES = new Set([
+const OPENCLAW_FLAGS_WITH_VALUES = new Set([
   "--channel",
+  "--config",
   "--container",
   "--log-level",
   "--profile",
 ]);
-const PACKAGE_MANAGER_NAMES = new Set(["pnpm", "npm", "yarn"]);
-const PACKAGE_MANAGER_EXEC_COMMANDS = new Set(["exec", "dlx", "x"]);
-const PACKAGE_MANAGER_RUN_COMMANDS = new Set(["run"]);
-const PACKAGE_MANAGER_OPTIONS_WITH_VALUE = new Set([
+
+const OPENCLAW_VALUELESS_FLAGS = new Set(["--dev", "--no-color"]);
+const PACKAGE_RUNNER_COMMANDS = new Set(["pnpm", "npm", "yarn"]);
+const PACKAGE_RUNNER_VALUE_FLAGS = new Set([
   "-C",
   "-F",
-  "--cache",
-  "--config",
+  "-p",
   "--cwd",
   "--dir",
   "--filter",
-  "--global-dir",
-  "--modules-dir",
+  "--package",
   "--prefix",
-  "--registry",
-  "--store-dir",
-  "--userconfig",
-  "--virtual-store-dir",
   "--workspace",
 ]);
-const PACKAGE_MANAGER_FLAG_OPTIONS = new Set(["-w", "--workspace-root"]);
-const PACKAGE_EXEC_OPTIONS_WITH_VALUE = new Set(["-p", "--package", "-w", "--workspace"]);
-const PACKAGE_EXEC_FLAG_OPTIONS = new Set(["-ws", "--workspaces", "--include-workspace-root"]);
-const PACKAGE_EXEC_CALL_OPTIONS = new Set(["-c", "--call"]);
-
-type ControlCommandOption = {
-  name: string;
-  value: string | true;
-};
-
-type NormalizedControlCommand = {
-  executable: string;
-  argv: string[];
-  raw: string;
-  words: string[];
-  options: readonly ControlCommandOption[];
-};
-
-type ControlOptionPattern = {
-  value?: string | RegExp;
-};
-
-type ControlOperandPattern = {
-  value?: string | RegExp;
-  pathUnder?: ".ssh";
-};
-
-type ControlCommandPattern = {
-  executable?: string | readonly string[];
-  command?: readonly (readonly string[])[];
-  options?: Readonly<Record<string, ControlOptionPattern>>;
-  operands?: readonly ControlOperandPattern[];
-};
-
-type ControlShellPolicyContext = {
-  command: string;
-  invocations: readonly NormalizedControlCommand[];
-  heredocTexts: readonly string[];
-  redirectTargets: readonly string[];
-};
-
-type ControlShellPolicy = {
-  decision: Exclude<ControlShellPolicyDecision, { kind: "allow" }>;
-  matches: (context: ControlShellPolicyContext) => boolean;
-};
-
-function normalizeCommandBaseName(token: string | undefined): string {
-  if (!token) {
-    return "";
-  }
-  const base = token.split(/[\\/]/u).at(-1)?.toLowerCase() ?? "";
-  const normalized = base.replace(/\.(?:cmd|exe)$/u, "");
-  return normalized === "openclaw" || normalized.startsWith("openclaw@") ? "openclaw" : normalized;
-}
-
-function optionName(token: string): string {
-  return token.length > 1 ? token.replace(/[=].+$/u, "") : token;
-}
-
-function skipPackageManagerOptions(argv: readonly string[], startIndex: number): number {
-  let index = startIndex;
-  while (index < argv.length) {
-    const token = argv[index] ?? "";
-    if (token === "--") {
-      return index + 1;
-    }
-    if (!token.startsWith("-") || token === "-") {
-      return index;
-    }
-    const name = optionName(token);
-    index += 1;
-    if (PACKAGE_MANAGER_FLAG_OPTIONS.has(name)) {
-      continue;
-    }
-    if (!token.includes("=") && PACKAGE_MANAGER_OPTIONS_WITH_VALUE.has(name)) {
-      index += 1;
-    }
-  }
-  return index;
-}
-
-function skipPackageExecOptions(argv: readonly string[], startIndex: number): number {
-  let index = startIndex;
-  while (index < argv.length) {
-    const token = argv[index] ?? "";
-    if (token === "--") {
-      return index + 1;
-    }
-    if (!token.startsWith("-") || token === "-") {
-      return index;
-    }
-    const name = optionName(token);
-    index += 1;
-    if (PACKAGE_EXEC_FLAG_OPTIONS.has(name)) {
-      continue;
-    }
-    if (!token.includes("=") && PACKAGE_EXEC_OPTIONS_WITH_VALUE.has(name)) {
-      index += 1;
-    }
-  }
-  return index;
-}
-
-function packageOptionValue(params: {
-  argv: readonly string[];
-  index: number;
-  options: ReadonlySet<string>;
-}): { value: string; nextIndex: number } | null {
-  const token = params.argv[params.index] ?? "";
-  const name = optionName(token);
-  if (params.options.has(name)) {
-    if (token.includes("=")) {
-      const delimiterIndex = token.indexOf("=");
-      return { value: token.slice(delimiterIndex + 1), nextIndex: params.index + 1 };
-    }
-    const value = params.argv[params.index + 1];
-    return value === undefined ? null : { value, nextIndex: params.index + 2 };
-  }
-  if (!token.startsWith("--")) {
-    for (const option of params.options) {
-      if (option.length === 2 && token.startsWith(option) && token.length > option.length) {
-        return { value: token.slice(option.length), nextIndex: params.index + 1 };
-      }
-    }
-  }
-  return null;
-}
-
-function packageExecCallPayloadText(argv: readonly string[], startIndex: number): string | null {
-  let index = startIndex;
-  while (index < argv.length) {
-    const token = argv[index] ?? "";
-    if (token === "--") {
-      return null;
-    }
-    if (!token.startsWith("-") || token === "-") {
-      return null;
-    }
-    const call = packageOptionValue({
-      argv,
-      index,
-      options: PACKAGE_EXEC_CALL_OPTIONS,
-    });
-    if (call) {
-      return call.value.trim().length > 0 ? call.value : null;
-    }
-    const name = optionName(token);
-    index += 1;
-    if (PACKAGE_EXEC_FLAG_OPTIONS.has(name)) {
-      continue;
-    }
-    if (!token.includes("=") && PACKAGE_EXEC_OPTIONS_WITH_VALUE.has(name)) {
-      index += 1;
-    }
-  }
-  return null;
-}
-
-function packageExecCallPayload(argv: readonly string[], startIndex: number): string[] | null {
-  const payload = packageExecCallPayloadText(argv, startIndex);
-  if (!payload) {
-    return null;
-  }
-  const payloadArgv = splitShellArgs(payload) ?? payload.trim().split(/\s+/u);
-  const normalized = payloadArgv.filter((part) => part.trim().length > 0);
-  return normalized.length > 0 ? normalized : null;
-}
-
-function packageRunnerCallPayloadText(argv: readonly string[]): string | null {
-  const commandName = normalizeCommandBaseName(argv[0]);
-  if (PACKAGE_MANAGER_NAMES.has(commandName)) {
-    const packageCommandIndex = skipPackageManagerOptions(argv, 1);
-    const packageCommand = argv[packageCommandIndex] ?? "";
-    return PACKAGE_MANAGER_EXEC_COMMANDS.has(packageCommand)
-      ? packageExecCallPayloadText(argv, packageCommandIndex + 1)
-      : null;
-  }
-  return commandName === "npx" ? packageExecCallPayloadText(argv, 1) : null;
-}
-
-function stripOpenClawPackageRunner(argv: string[]): string[] {
-  const commandName = normalizeCommandBaseName(argv[0]);
-  if (commandName === "openclaw") {
-    return argv;
-  }
-  if (!PACKAGE_MANAGER_NAMES.has(commandName)) {
-    return stripNpxPackageRunner(argv);
-  }
-  const packageCommandIndex = skipPackageManagerOptions(argv, 1);
-  if (
-    argv[packageCommandIndex] !== undefined &&
-    normalizeCommandBaseName(argv[packageCommandIndex]) === "openclaw"
-  ) {
-    return argv.slice(packageCommandIndex);
-  }
-  const packageCommand = argv[packageCommandIndex] ?? "";
-  if (PACKAGE_MANAGER_EXEC_COMMANDS.has(packageCommand)) {
-    const callPayload = packageExecCallPayload(argv, packageCommandIndex + 1);
-    if (callPayload) {
-      return callPayload;
-    }
-    const payloadIndex = skipPackageExecOptions(argv, packageCommandIndex + 1);
-    return payloadIndex < argv.length ? argv.slice(payloadIndex) : argv;
-  }
-  if (PACKAGE_MANAGER_RUN_COMMANDS.has(packageCommand)) {
-    const payloadIndex = skipPackageExecOptions(argv, packageCommandIndex + 1);
-    if (
-      argv[payloadIndex] !== undefined &&
-      normalizeCommandBaseName(argv[payloadIndex]) === "openclaw"
-    ) {
-      return argv.slice(payloadIndex);
-    }
-  }
-  return argv;
-}
-
-function stripNpxPackageRunner(argv: string[]): string[] {
-  const commandName = normalizeCommandBaseName(argv[0]);
-  if (commandName === "bun" && normalizeCommandBaseName(argv[1]) === "openclaw") {
-    return argv.slice(1);
-  }
-  if (commandName === "npx" || commandName === "bunx") {
-    if (commandName === "npx") {
-      const callPayload = packageExecCallPayload(argv, 1);
-      if (callPayload) {
-        return callPayload;
-      }
-    }
-    let index = 1;
-    while (index < argv.length) {
-      const token = argv[index] ?? "";
-      if (token === "--") {
-        index += 1;
-        break;
-      }
-      if (!token.startsWith("-") || token === "-") {
-        break;
-      }
-      index += 1;
-      if ((token === "-p" || token === "--package") && index < argv.length) {
-        index += 1;
-      }
-    }
-    if (normalizeCommandBaseName(argv[index]) === "openclaw") {
-      return argv.slice(index);
-    }
-  }
-  return argv;
-}
-
-function textMentionsSecurityAuditSuppressions(value: string): boolean {
-  const normalized = value.toLowerCase();
-  return (
-    normalized.includes("security.audit.suppressions") ||
-    /["']?security["']?[\s\S]{0,200}["']?audit["']?[\s\S]{0,200}["']?suppressions["']?/.test(
-      normalized,
-    )
-  );
-}
-
-function normalizeOptionName(token: string): string {
-  return token.length > 1 ? token.replace(/[=].+$/u, "") : token;
-}
-
-function appendOption(options: ControlCommandOption[], name: string, value: string | true): void {
-  options.push({ name: normalizeOptionName(name), value });
-}
-
-function parseNormalizedCommandWords(argv: string[]): {
-  executable: string;
-  words: string[];
-  options: ControlCommandOption[];
-} | null {
-  const strippedArgv = stripOpenClawPackageRunner(argv);
-  const executable = normalizeCommandBaseName(strippedArgv[0]);
-  if (!executable) {
-    return null;
-  }
-  const words: string[] = [];
-  const options: ControlCommandOption[] = [];
-  let index = 1;
-  let optionsTerminated = false;
-
-  while (index < strippedArgv.length) {
-    const token = strippedArgv[index] ?? "";
-    if (!optionsTerminated && token === "--") {
-      optionsTerminated = true;
-      index += 1;
-      continue;
-    }
-    if (!optionsTerminated && token.startsWith("--") && token.length > 2) {
-      const equalsIndex = token.indexOf("=");
-      if (equalsIndex > 2) {
-        appendOption(options, token.slice(0, equalsIndex), token.slice(equalsIndex + 1));
-        index += 1;
-        continue;
-      }
-      if (CONTROL_OPTION_FLAGS_WITH_VALUES.has(token) && strippedArgv[index + 1] !== undefined) {
-        appendOption(options, token, strippedArgv[index + 1] ?? "");
-        index += 2;
-        continue;
-      }
-      appendOption(options, token, true);
-      index += 1;
-      continue;
-    }
-    if (!optionsTerminated && token.startsWith("-") && token !== "-") {
-      appendOption(options, token, true);
-      index += 1;
-      continue;
-    }
-    words.push(token);
-    index += 1;
-  }
-
-  return { executable, words, options };
-}
-
-function normalizeControlCommand(
-  candidate: ControlShellCandidate,
-): NormalizedControlCommand | null {
-  const parsed = parseNormalizedCommandWords(candidate.argv);
-  if (!parsed) {
-    return null;
-  }
-  return {
-    executable: parsed.executable,
-    argv: candidate.argv,
-    raw: candidate.raw,
-    words: parsed.words,
-    options: parsed.options,
-  };
-}
-
-function normalizeControlCommands(
-  candidates: readonly ControlShellCandidate[],
-): NormalizedControlCommand[] {
-  return candidates.flatMap((candidate) => {
-    const normalized = normalizeControlCommand(candidate);
-    return normalized ? [normalized] : [];
-  });
-}
-
-function commandText(invocation: NormalizedControlCommand): string {
-  return `${invocation.raw} ${invocation.argv.join(" ")}`;
-}
-
-function invocationMentionsSecurityAuditSuppressions(
-  invocation: NormalizedControlCommand,
-): boolean {
-  return textMentionsSecurityAuditSuppressions(commandText(invocation));
-}
-
-function removeCandidateText(
-  command: string,
-  invocations: readonly NormalizedControlCommand[],
-): string {
-  let remaining = command;
-  for (const invocation of invocations) {
-    const raw = invocation.raw.trim();
-    if (raw.length === 0) {
-      continue;
-    }
-    remaining = remaining.replace(raw, " ");
-  }
-  return remaining;
-}
-
-function stringOrRegexMatches(pattern: string | RegExp, value: string): boolean {
-  return typeof pattern === "string" ? value === pattern : pattern.test(value);
-}
-
-function matchesOneOf(value: string, expected: string | readonly string[] | undefined): boolean {
-  if (expected === undefined) {
-    return true;
-  }
-  return typeof expected === "string" ? value === expected : expected.includes(value);
-}
-
-function commandPathMatches(
-  invocation: NormalizedControlCommand,
-  command: ControlCommandPattern["command"],
-): boolean {
-  const paths = command ?? [];
-  if (paths.length === 0) {
-    return true;
-  }
-  return paths.some((path) => {
-    if (path.length > invocation.words.length) {
-      return false;
-    }
-    return path.every((part, index) => invocation.words[index] === part);
-  });
-}
-
-function optionMatches(
-  invocation: NormalizedControlCommand,
-  optionName: string,
-  pattern: ControlOptionPattern,
-): boolean {
-  const matches = invocation.options.filter((option) => option.name === optionName);
-  const expectedValue = pattern.value;
-  if (expectedValue === undefined) {
-    return matches.length > 0;
-  }
-  return matches.some(
-    (option) => option.value !== true && stringOrRegexMatches(expectedValue, option.value),
-  );
-}
-
-function pathMatchesStaticSshPath(value: string): boolean {
-  const normalized = value.replace(/\\/gu, "/");
-  return (
-    normalized === "~/.ssh" ||
-    normalized.startsWith("~/.ssh/") ||
-    normalized === ".ssh" ||
-    normalized.startsWith(".ssh/") ||
-    normalized === "./.ssh" ||
-    normalized.startsWith("./.ssh/") ||
-    normalized.includes("/.ssh/")
-  );
-}
-
-function textMentionsStaticSshPath(value: string): boolean {
-  const normalized = value.replace(/\\/gu, "/");
-  return (
-    /(?:^|[^A-Za-z0-9_./~-])(?:~\/\.ssh|\.\/\.ssh|\.ssh)(?:\/|$|[^A-Za-z0-9_./-])/u.test(
-      normalized,
-    ) || /(?:^|[^A-Za-z0-9_./-])\/[^"'`\s]*\/\.ssh(?:\/|$|[^A-Za-z0-9_./-])/u.test(normalized)
-  );
-}
-
-function operandMatches(value: string, pattern: ControlOperandPattern): boolean {
-  if (pattern.value !== undefined && !stringOrRegexMatches(pattern.value, value)) {
-    return false;
-  }
-  if (pattern.pathUnder === ".ssh" && !pathMatchesStaticSshPath(value)) {
-    return false;
-  }
-  return true;
-}
-
-function matchesControlCommandPattern(params: {
-  invocation: NormalizedControlCommand;
-  pattern: ControlCommandPattern;
-}): boolean {
-  const pattern = params.pattern;
-  if (!matchesOneOf(params.invocation.executable, pattern.executable)) {
-    return false;
-  }
-  if (!commandPathMatches(params.invocation, pattern.command)) {
-    return false;
-  }
-  for (const [optionName, optionPattern] of Object.entries(pattern.options ?? {})) {
-    if (!optionMatches(params.invocation, optionName, optionPattern)) {
-      return false;
-    }
-  }
-  for (const operandPattern of pattern.operands ?? []) {
-    if (!params.invocation.words.some((operand) => operandMatches(operand, operandPattern))) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function hasMatchingInvocation(params: {
-  invocations: readonly NormalizedControlCommand[];
-  patterns: readonly ControlCommandPattern[];
-}): boolean {
-  return params.invocations.some((invocation) =>
-    params.patterns.some((pattern) => matchesControlCommandPattern({ invocation, pattern })),
-  );
-}
-
-const INTERACTIVE_CHANNEL_LOGIN_PATTERNS: readonly ControlCommandPattern[] = [
-  { executable: "openclaw", command: [["channels", "login"]] },
-  { executable: "openclaw", command: [["channel", "login"]] },
-];
-
-const READ_ONLY_SECURITY_AUDIT_SUPPRESSION_PATTERNS: readonly ControlCommandPattern[] = [
-  { executable: "openclaw", command: [["config", "get"]] },
-  { executable: "openclaw", command: [["config", "schema"]] },
-  { executable: "openclaw", command: [["config", "validate"]] },
-];
-
-const MUTATING_SECURITY_AUDIT_SUPPRESSION_PATTERNS: readonly ControlCommandPattern[] = [
-  { executable: "openclaw", command: [["config", "set"]] },
-  { executable: "openclaw", command: [["config", "unset"]] },
-  { executable: "openclaw", command: [["config", "patch"]] },
-  { executable: "openclaw", command: [["config", "apply"]] },
-];
-
-const SSH_FILE_READ_PATTERNS: readonly ControlCommandPattern[] = [
-  {
-    executable: [
-      "awk",
-      "cat",
-      "cp",
-      "dd",
-      "grep",
-      "head",
-      "less",
-      "more",
-      "powershell",
-      "python",
-      "python3",
-      "sed",
-      "tail",
-      "tar",
-    ],
-    operands: [{ pathUnder: ".ssh" }],
-  },
-];
-
-const SSH_FILE_READER_EXECUTABLES = new Set([
-  "awk",
-  "cat",
-  "cp",
-  "dd",
-  "grep",
-  "head",
-  "less",
-  "more",
-  "powershell",
-  "python",
-  "python3",
-  "sed",
-  "tail",
-  "tar",
-]);
-
+const PACKAGE_RUNNER_CALL_FLAGS = new Set(["-c", "--call"]);
+const NPM_WORKSPACE_VALUE_FLAGS = new Set(["-w", "--workspace"]);
 const CURL_UPLOAD_FILE_OPTIONS = new Set(["-T", "--upload-file"]);
 const CURL_FILE_READ_OPTIONS = new Set(["-K", "--config", "--netrc-file"]);
 const CURL_FILE_URL_OPTIONS = new Set(["--url"]);
@@ -628,65 +91,246 @@ const CURL_AT_FILE_OPTIONS = new Set([
   "--form",
 ]);
 const CURL_NAME_AT_FILE_OPTIONS = new Set(["--data-urlencode"]);
+const SSH_FILE_READER_EXECUTABLES = new Set([
+  "awk",
+  "cat",
+  "cp",
+  "dd",
+  "grep",
+  "head",
+  "less",
+  "more",
+  "powershell",
+  "python",
+  "python3",
+  "sed",
+  "tail",
+  "tar",
+]);
 
-function requiresSecurityAuditSuppressionApproval(params: {
-  command: string;
-  invocations: readonly NormalizedControlCommand[];
-  heredocTexts: readonly string[];
-}): boolean {
-  const mentioningInvocations = params.invocations.filter(
-    invocationMentionsSecurityAuditSuppressions,
-  );
-  if (mentioningInvocations.length > 0) {
-    if (
-      hasMatchingInvocation({
-        invocations: mentioningInvocations,
-        patterns: MUTATING_SECURITY_AUDIT_SUPPRESSION_PATTERNS,
-      })
-    ) {
-      return true;
-    }
-    if (
-      mentioningInvocations.every((invocation) =>
-        READ_ONLY_SECURITY_AUDIT_SUPPRESSION_PATTERNS.some((pattern) =>
-          matchesControlCommandPattern({
-            invocation,
-            pattern,
-          }),
-        ),
-      )
-    ) {
-      return textMentionsSecurityAuditSuppressions(
-        removeCandidateText(params.command, mentioningInvocations),
-      );
-    }
-    return true;
+function normalizeCommandBaseName(token: string | undefined): string {
+  if (!token) {
+    return "";
   }
-
-  if (!textMentionsSecurityAuditSuppressions(params.command)) {
-    return false;
-  }
-  return true;
+  const base = token.split(/[\\/]/u).at(-1)?.toLowerCase() ?? "";
+  const normalized = base.replace(/\.(?:cmd|exe)$/u, "");
+  return normalized === "openclaw" || normalized.startsWith("openclaw@") ? "openclaw" : normalized;
 }
 
-function redirectTokenPathCandidates(text: string): string[] {
-  const tokens = splitShellArgs(text) ?? text.trim().split(/\s+/u);
-  const paths: string[] = [];
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index] ?? "";
-    const attached = /^(?:\d+)?(?:<>|>>|[<>]|&>)(.+)$/u.exec(token)?.[1];
-    if (attached) {
-      paths.push(attached);
-      continue;
+function stripOpenClawPackageRunner(argv: string[]): string[] {
+  const commandName = normalizeCommandBaseName(argv[0]);
+  if (commandName === "openclaw") {
+    return argv;
+  }
+  if (PACKAGE_RUNNER_COMMANDS.has(commandName)) {
+    const runnerCommandIndex = packageRunnerCommandIndex(argv, 1, commandName);
+    if (normalizeCommandBaseName(argv[runnerCommandIndex]) === "openclaw") {
+      return argv.slice(runnerCommandIndex);
     }
-    if (/^(?:\d+)?(?:<>|>>|[<>]|&>)$/u.test(token)) {
-      const next = tokens[index + 1];
-      if (next) {
-        paths.push(next);
+    const runnerCommand = argv[runnerCommandIndex] ?? "";
+    if (
+      runnerCommand === "exec" ||
+      runnerCommand === "dlx" ||
+      runnerCommand === "run" ||
+      runnerCommand === "x"
+    ) {
+      const commandIndex = packageRunnerCommandIndex(argv, runnerCommandIndex + 1, commandName);
+      if (normalizeCommandBaseName(argv[commandIndex]) === "openclaw") {
+        return argv.slice(commandIndex);
       }
     }
   }
-  return paths;
+  if (commandName === "bun" && normalizeCommandBaseName(argv[1]) === "openclaw") {
+    return argv.slice(1);
+  }
+  if (commandName === "npx" || commandName === "bunx") {
+    const commandIndex = packageRunnerCommandIndex(argv, 1, commandName);
+    if (normalizeCommandBaseName(argv[commandIndex]) === "openclaw") {
+      return argv.slice(commandIndex);
+    }
+  }
+  return argv;
+}
+
+function packageRunnerOptionConsumesValue(commandName: string, option: string): boolean {
+  if (PACKAGE_RUNNER_VALUE_FLAGS.has(option)) {
+    return true;
+  }
+  return (commandName === "npm" || commandName === "npx") && NPM_WORKSPACE_VALUE_FLAGS.has(option);
+}
+
+function packageRunnerCommandIndex(
+  argv: string[],
+  startIndex: number,
+  commandName: string,
+): number {
+  let index = startIndex;
+  while (index < argv.length) {
+    const token = argv[index] ?? "";
+    if (token === "--") {
+      return index + 1;
+    }
+    if (!token.startsWith("-") || token === "-") {
+      return index;
+    }
+    const name = optionName(token);
+    index += 1;
+    if (
+      !token.includes("=") &&
+      packageRunnerOptionConsumesValue(commandName, name) &&
+      index < argv.length
+    ) {
+      index += 1;
+    }
+  }
+  return index;
+}
+
+function optionName(token: string): string {
+  return token.split("=", 1)[0] ?? token;
+}
+
+function optionInlineValue(token: string, option: string): string | null {
+  if (token.startsWith(`${option}=`)) {
+    return token.slice(option.length + 1);
+  }
+  if (option.length === 2 && token.startsWith(option) && token.length > option.length) {
+    return token.slice(option.length);
+  }
+  return null;
+}
+
+function packageRunnerCallPayload(argv: string[]): string | null {
+  const commandName = normalizeCommandBaseName(argv[0]);
+  let index: number | null = null;
+  if (PACKAGE_RUNNER_COMMANDS.has(commandName)) {
+    const runnerCommandIndex = packageRunnerCommandIndex(argv, 1, commandName);
+    const runnerCommand = argv[runnerCommandIndex] ?? "";
+    if (runnerCommand === "exec" || runnerCommand === "dlx" || runnerCommand === "x") {
+      index = runnerCommandIndex + 1;
+    }
+  } else if (commandName === "npx") {
+    index = 1;
+  }
+  if (index === null) {
+    return null;
+  }
+  while (index < argv.length) {
+    const token = argv[index] ?? "";
+    if (token === "--" || token === "-") {
+      return null;
+    }
+    if (!token.startsWith("-")) {
+      return null;
+    }
+    const name = optionName(token);
+    if (PACKAGE_RUNNER_CALL_FLAGS.has(name)) {
+      const inlineValue = optionInlineValue(token, name);
+      const payload = inlineValue ?? argv[index + 1] ?? "";
+      const trimmed = payload.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    }
+    index += 1;
+    if (
+      !token.includes("=") &&
+      packageRunnerOptionConsumesValue(commandName, name) &&
+      index < argv.length
+    ) {
+      index += 1;
+    }
+  }
+  return null;
+}
+
+function packageRunnerExecPayloadArgv(argv: string[]): string[] | null {
+  const commandName = normalizeCommandBaseName(argv[0]);
+  let commandIndex: number | null = null;
+  if (PACKAGE_RUNNER_COMMANDS.has(commandName)) {
+    const runnerCommandIndex = packageRunnerCommandIndex(argv, 1, commandName);
+    const runnerCommand = argv[runnerCommandIndex] ?? "";
+    if (runnerCommand === "exec" || runnerCommand === "dlx" || runnerCommand === "x") {
+      commandIndex = packageRunnerCommandIndex(argv, runnerCommandIndex + 1, commandName);
+    }
+  } else if (commandName === "npx" || commandName === "bunx") {
+    commandIndex = packageRunnerCommandIndex(argv, 1, commandName);
+  }
+  if (commandIndex === null || commandIndex >= argv.length) {
+    return null;
+  }
+  const payloadArgv = argv.slice(commandIndex);
+  return payloadArgv.length > 0 ? payloadArgv : null;
+}
+
+function extractOpenClawWords(argv: string[]): string[] | null {
+  const stripped = stripOpenClawPackageRunner(argv);
+  if (normalizeCommandBaseName(stripped[0]) !== "openclaw") {
+    return null;
+  }
+  const words: string[] = [];
+  let index = 1;
+  let optionsTerminated = false;
+  while (index < stripped.length) {
+    const token = stripped[index] ?? "";
+    if (!optionsTerminated && token === "--") {
+      optionsTerminated = true;
+      index += 1;
+      continue;
+    }
+    if (!optionsTerminated && OPENCLAW_VALUELESS_FLAGS.has(token)) {
+      index += 1;
+      continue;
+    }
+    if (!optionsTerminated && OPENCLAW_FLAGS_WITH_VALUES.has(token)) {
+      index += 2;
+      continue;
+    }
+    if (
+      !optionsTerminated &&
+      [...OPENCLAW_FLAGS_WITH_VALUES].some((flag) => token.startsWith(`${flag}=`))
+    ) {
+      index += 1;
+      continue;
+    }
+    if (!optionsTerminated && token.startsWith("-") && token !== "-") {
+      index += 1;
+      continue;
+    }
+    words.push(token);
+    index += 1;
+  }
+  return words;
+}
+
+function textMentionsSecurityAuditSuppressions(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    normalized.includes("security.audit.suppressions") ||
+    /["']?security["']?[\s\S]{0,200}["']?audit["']?[\s\S]{0,200}["']?suppressions["']?/.test(
+      normalized,
+    )
+  );
+}
+
+function pathMatchesStaticSshPath(value: string): boolean {
+  const normalized = value.replace(/\\/gu, "/");
+  return (
+    normalized === "~/.ssh" ||
+    normalized.startsWith("~/.ssh/") ||
+    normalized === ".ssh" ||
+    normalized.startsWith(".ssh/") ||
+    normalized === "./.ssh" ||
+    normalized.startsWith("./.ssh/") ||
+    normalized.includes("/.ssh/")
+  );
+}
+
+function textMentionsStaticSshPath(value: string): boolean {
+  const normalized = value.replace(/\\/gu, "/");
+  return (
+    /(?:^|[^A-Za-z0-9_./~-])(?:~\/\.ssh|\.\/\.ssh|\.ssh)(?:\/|$|[^A-Za-z0-9_./-])/u.test(
+      normalized,
+    ) || /(?:^|[^A-Za-z0-9_./-])\/[^"'`\s]*\/\.ssh(?:\/|$|[^A-Za-z0-9_./-])/u.test(normalized)
+  );
 }
 
 function curlFileOperandPathCandidates(value: string, option: string): string[] {
@@ -856,80 +500,113 @@ function curlReadsSshFile(argv: readonly string[]): boolean {
   return false;
 }
 
-function requiresSshFileReadApproval(params: {
-  command: string;
-  invocations: readonly NormalizedControlCommand[];
-  heredocTexts: readonly string[];
-  redirectTargets: readonly string[];
-}): boolean {
-  if (
-    hasMatchingInvocation({
-      invocations: params.invocations,
-      patterns: SSH_FILE_READ_PATTERNS,
-    })
-  ) {
-    return true;
-  }
-  for (const invocation of params.invocations) {
-    if (
-      SSH_FILE_READER_EXECUTABLES.has(invocation.executable) &&
-      textMentionsStaticSshPath(commandText(invocation))
-    ) {
-      return true;
-    }
-    if (invocation.executable === "curl" && curlReadsSshFile(invocation.argv)) {
-      return true;
+function candidateText(candidate: ControlShellCandidate): string {
+  return `${candidate.raw} ${candidate.argv.join(" ")}`;
+}
+
+function removeCandidateText(
+  command: string,
+  candidates: readonly ControlShellCandidate[],
+): string {
+  let remaining = command;
+  for (const candidate of candidates) {
+    const raw = candidate.raw.trim();
+    if (raw.length > 0) {
+      remaining = remaining.replace(raw, " ");
     }
   }
-  return (
-    params.redirectTargets.some(pathMatchesStaticSshPath) ||
-    params.heredocTexts.some(textMentionsStaticSshPath)
+  return remaining;
+}
+
+function isExecApprovalShellCommand(raw: string): boolean {
+  return /^\/approve(?:@[^\s]+)?\s+[A-Za-z0-9][A-Za-z0-9._:-]*\s+(?:allow-once|allow-always|always|deny)\b/iu.test(
+    raw.trimStart(),
   );
+}
+
+function isOpenClawChannelsLoginArgv(argv: string[]): boolean {
+  const words = extractOpenClawWords(argv);
+  return (
+    words !== null && (words[0] === "channels" || words[0] === "channel") && words[1] === "login"
+  );
+}
+
+function isReadOnlySecurityAuditSuppressionInspection(argv: string[]): boolean {
+  const words = extractOpenClawWords(argv);
+  return (
+    words !== null &&
+    words[0] === "config" &&
+    (words[1] === "get" || words[1] === "schema" || words[1] === "validate")
+  );
+}
+
+function requiresSecurityAuditSuppressionApproval(params: {
+  command: string;
+  candidates: readonly ControlShellCandidate[];
+}): boolean {
+  const mentioningCandidates = params.candidates.filter((candidate) =>
+    textMentionsSecurityAuditSuppressions(candidateText(candidate)),
+  );
+  if (mentioningCandidates.length === 0) {
+    return textMentionsSecurityAuditSuppressions(params.command);
+  }
+  if (
+    mentioningCandidates.every((candidate) =>
+      isReadOnlySecurityAuditSuppressionInspection(candidate.argv),
+    )
+  ) {
+    return textMentionsSecurityAuditSuppressions(
+      removeCandidateText(params.command, mentioningCandidates),
+    );
+  }
+  return true;
+}
+
+function requiresSshFileReadApproval(candidates: readonly ControlShellCandidate[]): boolean {
+  return candidates.some((candidate) => {
+    const executable = normalizeCommandBaseName(candidate.argv[0]);
+    if (executable === "curl") {
+      return (
+        curlReadsSshFile(candidate.argv) ||
+        (/[<>]/u.test(candidate.raw) && textMentionsStaticSshPath(candidateText(candidate)))
+      );
+    }
+    if (!SSH_FILE_READER_EXECUTABLES.has(executable)) {
+      return false;
+    }
+    return (
+      candidate.argv.slice(1).some(pathMatchesStaticSshPath) ||
+      textMentionsStaticSshPath(candidateText(candidate))
+    );
+  });
+}
+
+function sshRedirectFallbackCandidate(command: string): ControlShellCandidate | null {
+  if (!/[<>]/u.test(command) || !textMentionsStaticSshPath(command)) {
+    return null;
+  }
+  const candidate = candidateFromRaw(command);
+  const executable = normalizeCommandBaseName(candidate.argv[0]);
+  return SSH_FILE_READER_EXECUTABLES.has(executable) || executable === "curl" ? candidate : null;
 }
 
 export function parseOpenClawChannelsLoginShellCommand(raw: string): boolean {
   const argv = splitShellArgs(raw);
-  if (!argv) {
-    return false;
-  }
-  const invocation = normalizeControlCommand({ argv, raw });
-  return invocation
-    ? INTERACTIVE_CHANNEL_LOGIN_PATTERNS.some((pattern) =>
-        matchesControlCommandPattern({ invocation, pattern }),
-      )
-    : false;
+  return argv ? isOpenClawChannelsLoginArgv(argv) : false;
 }
-
-const CONTROL_SHELL_POLICIES: readonly ControlShellPolicy[] = [
-  {
-    decision: { kind: "deny", message: INTERACTIVE_CHANNEL_LOGIN_DENY_MESSAGE },
-    matches: ({ invocations }) =>
-      hasMatchingInvocation({
-        invocations,
-        patterns: INTERACTIVE_CHANNEL_LOGIN_PATTERNS,
-      }),
-  },
-  {
-    decision: { kind: "requires-approval", warning: SECURITY_AUDIT_SUPPRESSION_WARNING },
-    matches: requiresSecurityAuditSuppressionApproval,
-  },
-  {
-    decision: { kind: "requires-approval", warning: SSH_FILE_READ_WARNING },
-    matches: requiresSshFileReadApproval,
-  },
-];
 
 function appendCandidate(
   candidates: ControlShellCandidate[],
   seen: Set<string>,
   candidate: ControlShellCandidate,
-): void {
+): boolean {
   const key = `${candidate.raw}\0${candidate.argv.join("\0")}`;
   if (seen.has(key)) {
-    return;
+    return false;
   }
   seen.add(key);
   candidates.push(candidate);
+  return true;
 }
 
 function candidateFromRaw(raw: string): ControlShellCandidate {
@@ -939,111 +616,123 @@ function candidateFromRaw(raw: string): ControlShellCandidate {
   };
 }
 
-function appendPayloadCandidates(params: {
-  candidates: ControlShellCandidate[];
-  seen: Set<string>;
-  argv: string[];
-}): void {
-  for (const payload of buildCommandPayloadCandidates(params.argv)) {
-    appendCandidate(params.candidates, params.seen, candidateFromRaw(payload));
-  }
-}
-
 async function appendShellCommandTextCandidates(params: {
-  raw: string;
   candidates: ControlShellCandidate[];
   seen: Set<string>;
-  heredocTexts: string[];
-  redirectTargets: string[];
-  depth?: number;
-}): Promise<boolean> {
-  const depth = params.depth ?? 0;
-  if (depth > 4) {
-    return false;
+  raw: string;
+  depth: number;
+}): Promise<void> {
+  if (params.depth > 4) {
+    return;
   }
   try {
     const explanation = await explainShellCommand(params.raw);
-    if (!explanation.ok) {
-      return false;
-    }
-    for (const risk of explanation.risks) {
-      if (risk.kind === "redirect") {
-        params.redirectTargets.push(...redirectTokenPathCandidates(risk.text));
-      } else if (risk.kind === "heredoc") {
-        params.heredocTexts.push(risk.text);
-      }
-    }
-    for (const step of [...explanation.topLevelCommands, ...explanation.nestedCommands]) {
-      appendCandidate(params.candidates, params.seen, {
-        argv: step.argv,
-        raw: step.text,
-      });
-      appendPayloadCandidates({
-        candidates: params.candidates,
-        seen: params.seen,
-        argv: step.argv,
-      });
-      const packagePayload = packageRunnerCallPayloadText(step.argv);
-      if (packagePayload) {
-        await appendShellCommandTextCandidates({
-          ...params,
-          raw: packagePayload,
-          depth: depth + 1,
+    if (explanation.ok) {
+      for (const step of [...explanation.topLevelCommands, ...explanation.nestedCommands]) {
+        appendCandidate(params.candidates, params.seen, {
+          argv: step.argv,
+          raw: step.text,
+        });
+        await appendPayloadCandidates({
+          candidates: params.candidates,
+          seen: params.seen,
+          argv: step.argv,
+          depth: params.depth + 1,
         });
       }
+      return;
     }
-    return true;
   } catch {
-    return false;
+    // Fall back to best-effort argv parsing below.
+  }
+  const candidate = candidateFromRaw(params.raw);
+  if (appendCandidate(params.candidates, params.seen, candidate)) {
+    await appendPayloadCandidates({
+      candidates: params.candidates,
+      seen: params.seen,
+      argv: candidate.argv,
+      depth: params.depth + 1,
+    });
+  }
+}
+
+async function appendPayloadCandidates(params: {
+  candidates: ControlShellCandidate[];
+  seen: Set<string>;
+  argv: string[];
+  depth?: number;
+}): Promise<void> {
+  const depth = params.depth ?? 0;
+  if (depth > 4) {
+    return;
+  }
+  for (const payload of buildCommandPayloadCandidates(params.argv)) {
+    appendCandidate(params.candidates, params.seen, candidateFromRaw(payload));
+  }
+  const callPayload = packageRunnerCallPayload(params.argv);
+  if (callPayload) {
+    await appendShellCommandTextCandidates({
+      candidates: params.candidates,
+      seen: params.seen,
+      raw: callPayload,
+      depth: depth + 1,
+    });
+  }
+  const execPayloadArgv = packageRunnerExecPayloadArgv(params.argv);
+  if (execPayloadArgv) {
+    const candidate = {
+      argv: execPayloadArgv,
+      raw: execPayloadArgv.join(" "),
+    };
+    if (appendCandidate(params.candidates, params.seen, candidate)) {
+      await appendPayloadCandidates({
+        candidates: params.candidates,
+        seen: params.seen,
+        argv: execPayloadArgv,
+        depth: depth + 1,
+      });
+    }
   }
 }
 
 async function buildControlShellCandidates(params: {
   command: string;
   parsedSegments?: readonly ControlShellParsedSegment[];
-}): Promise<ControlShellInspection> {
+}): Promise<ControlShellCandidate[]> {
   const candidates: ControlShellCandidate[] = [];
-  const heredocTexts: string[] = [];
-  const redirectTargets: string[] = [];
   const seen = new Set<string>();
 
   for (const segment of params.parsedSegments ?? []) {
-    appendCandidate(candidates, seen, {
+    const candidate = {
       argv: segment.argv,
       raw: segment.raw ?? segment.argv.join(" "),
-    });
-    if (segment.expandPayloadCandidates !== false) {
-      appendPayloadCandidates({
-        candidates,
-        seen,
-        argv: segment.argv,
-      });
-      const packagePayload = packageRunnerCallPayloadText(segment.argv);
-      if (packagePayload) {
-        await appendShellCommandTextCandidates({
-          raw: packagePayload,
-          candidates,
-          seen,
-          heredocTexts,
-          redirectTargets,
-        });
-      }
-    }
-  }
-  if (params.command.trim().length === 0) {
-    return { candidates, heredocTexts, redirectTargets };
-  }
-
-  if (
-    await appendShellCommandTextCandidates({
-      raw: params.command,
+    };
+    appendCandidate(candidates, seen, candidate);
+    await appendPayloadCandidates({
       candidates,
       seen,
-      heredocTexts,
-      redirectTargets,
-    })
-  ) {
-    return { candidates, heredocTexts, redirectTargets };
+      argv: candidate.argv,
+    });
+  }
+
+  try {
+    const explanation = await explainShellCommand(params.command);
+    if (explanation.ok) {
+      for (const step of [...explanation.topLevelCommands, ...explanation.nestedCommands]) {
+        appendCandidate(candidates, seen, {
+          argv: step.argv,
+          raw: step.text,
+        });
+        await appendPayloadCandidates({
+          candidates,
+          seen,
+          argv: step.argv,
+        });
+      }
+      return candidates;
+    }
+  } catch {
+    // Fall back to best-effort line parsing below.
   }
 
   for (const line of params.command.split(/\r?\n/u)) {
@@ -1053,24 +742,14 @@ async function buildControlShellCandidates(params: {
     }
     const fallback = candidateFromRaw(raw);
     appendCandidate(candidates, seen, fallback);
-    appendPayloadCandidates({
+    await appendPayloadCandidates({
       candidates,
       seen,
       argv: fallback.argv,
     });
-    const packagePayload = packageRunnerCallPayloadText(fallback.argv);
-    if (packagePayload) {
-      await appendShellCommandTextCandidates({
-        raw: packagePayload,
-        candidates,
-        seen,
-        heredocTexts,
-        redirectTargets,
-      });
-    }
   }
 
-  return { candidates, heredocTexts, redirectTargets };
+  return candidates;
 }
 
 export async function inspectControlShellCommand(params: {
@@ -1078,23 +757,24 @@ export async function inspectControlShellCommand(params: {
   parsedSegments?: readonly ControlShellParsedSegment[];
 }): Promise<ControlShellPolicyDecision> {
   const command = params.command.trim();
-  const inspection = await buildControlShellCandidates({
+  const candidates = await buildControlShellCandidates({
     command,
     parsedSegments: params.parsedSegments,
   });
-  const invocations = normalizeControlCommands(inspection.candidates);
 
-  for (const policy of CONTROL_SHELL_POLICIES) {
-    if (
-      policy.matches({
-        command,
-        invocations,
-        heredocTexts: inspection.heredocTexts,
-        redirectTargets: inspection.redirectTargets,
-      })
-    ) {
-      return policy.decision;
-    }
+  if (candidates.some((candidate) => isExecApprovalShellCommand(candidate.raw))) {
+    return { kind: "deny", message: EXEC_APPROVAL_DENY_MESSAGE };
+  }
+  if (candidates.some((candidate) => isOpenClawChannelsLoginArgv(candidate.argv))) {
+    return { kind: "deny", message: INTERACTIVE_CHANNEL_LOGIN_DENY_MESSAGE };
+  }
+  if (requiresSecurityAuditSuppressionApproval({ command, candidates })) {
+    return { kind: "requires-approval", warning: SECURITY_AUDIT_SUPPRESSION_WARNING };
+  }
+  const sshRedirectCandidate = sshRedirectFallbackCandidate(command);
+  const sshCandidates = sshRedirectCandidate ? [...candidates, sshRedirectCandidate] : candidates;
+  if (requiresSshFileReadApproval(sshCandidates)) {
+    return { kind: "requires-approval", warning: SSH_FILE_READ_WARNING };
   }
 
   return { kind: "allow" };

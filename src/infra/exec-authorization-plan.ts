@@ -37,6 +37,7 @@ export type ExecAuthorizationTransport =
       kind: "shell-wrapper";
       wrapperSegment: ExecCommandSegment;
       wrapperArgv: string[];
+      wrapperPrefix: string;
       inlineCommand: string;
     };
 
@@ -44,6 +45,7 @@ export type ExecAuthorizationTrustMode = "executable" | "exact-command" | "promp
 
 export type ExecAuthorizationCandidate = {
   sourceSegment: ExecCommandSegment;
+  sourceStep: CommandStep;
   sourceStepId?: string;
   transport: ExecAuthorizationTransport;
   trustMode: ExecAuthorizationTrustMode;
@@ -88,7 +90,6 @@ const PROMPT_ONLY_RISKS = new Set<CommandRisk["kind"]>([
   "eval",
   "source",
   "alias",
-  "function-definition",
   "shell-wrapper-through-carrier",
   "command-carrier",
 ]);
@@ -102,11 +103,21 @@ const UNANALYZABLE_RISKS = new Set<CommandRisk["kind"]>([
   "process-substitution",
   "redirect",
   "syntax-error",
+  "env-assignment",
+  "function-definition",
 ]);
 
 const POWERSHELL_NAMES = new Set(["powershell", "pwsh"]);
 const WINDOWS_CMD_NAMES = new Set(["cmd", "cmd.exe"]);
 export const POSITIONAL_CARRIER_BLOCKED_EXECUTABLES = new Set(["find", "xargs"]);
+const UNSUPPORTED_DIRECT_SHELL_TOPOLOGY_SHAPES = new Set<CommandExplanation["shapes"][number]>([
+  "if",
+  "for",
+  "while",
+  "case",
+  "subshell",
+  "group",
+]);
 
 function commandSegmentFromStep(step: CommandStep, context: PlanningContext): ExecCommandSegment {
   return {
@@ -156,6 +167,10 @@ function riskInsideStep(risk: CommandRisk, step: CommandStep): boolean {
   return risk.span.startIndex >= step.span.startIndex && risk.span.endIndex <= step.span.endIndex;
 }
 
+function riskBeforeStepExecutable(risk: CommandRisk, step: CommandStep): boolean {
+  return riskInsideStep(risk, step) && risk.span.endIndex <= step.executableSpan.startIndex;
+}
+
 function stepReasons(step: CommandStep, risks: readonly CommandRisk[]): string[] {
   const reasons: string[] = [];
   for (const risk of risks) {
@@ -179,10 +194,22 @@ function riskInsidePromptOnlyStep(risk: CommandRisk, explanation: CommandExplana
   );
 }
 
-function hasBlockingRisk(explanation: CommandExplanation): string | null {
-  const risk = explanation.risks.find((entry) => UNANALYZABLE_RISKS.has(entry.kind));
+function findUnanalyzableRisk(explanation: CommandExplanation): CommandRisk | null {
+  return explanation.risks.find((entry) => UNANALYZABLE_RISKS.has(entry.kind)) ?? null;
+}
+
+function hasBlockingRisk(
+  explanation: CommandExplanation,
+): CommandRisk["kind"] | CommandExplanation["shapes"][number] | null {
+  const risk = findUnanalyzableRisk(explanation);
   if (risk) {
     return risk.kind;
+  }
+  const unsupportedShape = explanation.shapes.find((shape) =>
+    UNSUPPORTED_DIRECT_SHELL_TOPOLOGY_SHAPES.has(shape),
+  );
+  if (unsupportedShape) {
+    return unsupportedShape;
   }
   const dynamicArgument = explanation.risks.find(
     (entry) =>
@@ -194,8 +221,31 @@ function hasBlockingRisk(explanation: CommandExplanation): string | null {
   return null;
 }
 
+function shellWrapperPreludeReasons(params: {
+  step: CommandStep;
+  risks: readonly CommandRisk[];
+}): string[] {
+  const reasons = params.risks
+    .filter(
+      (risk) => UNANALYZABLE_RISKS.has(risk.kind) && riskBeforeStepExecutable(risk, params.step),
+    )
+    .map((risk) => risk.kind);
+  return [...new Set(reasons)];
+}
+
 function isPathScopedExecutableToken(token: string): boolean {
   return token.includes("/") || token.includes("\\");
+}
+
+function hasResolvedExecutionPath(segment: ExecCommandSegment): boolean {
+  const execution = segment.resolution?.execution;
+  return Boolean(execution?.resolvedPath?.trim() || execution?.resolvedRealPath?.trim());
+}
+
+function isUnresolvedPathScopedExecutable(segment: ExecCommandSegment): boolean {
+  return (
+    isPathScopedExecutableToken(segment.argv[0]?.trim() ?? "") && !hasResolvedExecutionPath(segment)
+  );
 }
 
 export function canUseReusableWrapperPayloadCandidates(
@@ -208,7 +258,9 @@ export function canUseReusableWrapperPayloadCandidates(
   if (segments.some((segment) => isPathScopedExecutableToken(segment.argv[0]?.trim() ?? ""))) {
     return false;
   }
-  return !normalizeExecutableToken(firstExecutable).endsWith("-wrapper");
+  return !segments.some((segment) =>
+    normalizeExecutableToken(segment.argv[0] ?? "").endsWith("-wrapper"),
+  );
 }
 
 function isShellExecutable(argv: readonly string[]): boolean {
@@ -216,11 +268,18 @@ function isShellExecutable(argv: readonly string[]): boolean {
   return POSIX_SHELL_NAMES.has(executable);
 }
 
-function canUseWrapperShellInvocation(argv: string[]): boolean {
+function canUseWrapperShellInvocation(segment: ExecCommandSegment): boolean {
+  const argv = segment.argv;
   return (
+    isShellExecutable(argv) &&
     !hasPosixInteractiveStartupBeforeInlineCommand(argv, POSIX_INLINE_COMMAND_FLAGS) &&
     !hasPosixLoginStartupBeforeInlineCommand(argv, POSIX_INLINE_COMMAND_FLAGS)
   );
+}
+
+function wrapperPrefixForStep(step: CommandStep): string {
+  const executableStart = Math.max(0, step.executableSpan.startIndex - step.span.startIndex);
+  return step.text.slice(0, executableStart);
 }
 
 function positionalCarrierSteps(params: {
@@ -235,7 +294,7 @@ function positionalCarrierSteps(params: {
   if (inlineMatch.valueTokenIndex === null || !inlineMatch.command) {
     return null;
   }
-  if (!canUseWrapperShellInvocation(params.wrapper.segment.argv)) {
+  if (!canUseWrapperShellInvocation(params.wrapper.segment)) {
     return null;
   }
   if (!isDirectShellPositionalCarrierCommand(inlineMatch.command)) {
@@ -304,20 +363,29 @@ function createCandidate(params: {
   transport: ExecAuthorizationTransport;
   risks: readonly CommandRisk[];
 }): ExecAuthorizationCandidate {
-  const reasons = stepReasons(params.step, params.risks);
   const isDirectShellWrapper =
     params.transport.kind === "direct" &&
     extractBindableShellWrapperInlineCommand(params.segment.argv);
+  const stepPromptReasons = stepReasons(params.step, params.risks);
+  const preludeReasons = isDirectShellWrapper
+    ? shellWrapperPreludeReasons({ step: params.step, risks: params.risks })
+    : [];
+  const reasons = [
+    ...new Set([...stepPromptReasons, ...preludeReasons]),
+  ];
   const trustMode: ExecAuthorizationTrustMode =
     params.segment.resolution?.policyBlocked === true
       ? "prompt-only"
       : isDirectShellWrapper
-        ? "exact-command"
-        : reasons.length > 0
+        ? preludeReasons.length > 0
+          ? "prompt-only"
+          : "exact-command"
+        : stepPromptReasons.length > 0
           ? "prompt-only"
           : "executable";
   return {
     sourceSegment: params.segment,
+    sourceStep: params.step,
     ...(params.step.id ? { sourceStepId: params.step.id } : {}),
     transport: params.transport,
     trustMode,
@@ -459,6 +527,22 @@ function shouldUseWrapperPayload(params: {
   );
 }
 
+function applyWrapperPayloadPersistenceBoundary(params: {
+  wrapper: CommandStepWithSegment;
+  groups: ExecAuthorizationGroup[];
+}): ExecAuthorizationGroup[] {
+  if (!isUnresolvedPathScopedExecutable(params.wrapper.segment)) {
+    return params.groups;
+  }
+  return params.groups.map((group) => ({
+    ...group,
+    candidates: group.candidates.map((candidate) => ({
+      ...candidate,
+      allowAlways: false,
+    })),
+  }));
+}
+
 function wrapperPayloadPlan(params: {
   context: PlanningContext;
   allowNestedPayload: boolean;
@@ -475,7 +559,7 @@ function wrapperPayloadPlan(params: {
   if (!wrapperRisk) {
     return null;
   }
-  if (!canUseWrapperShellInvocation(wrapper.segment.argv)) {
+  if (!canUseWrapperShellInvocation(wrapper.segment)) {
     return null;
   }
   const carriedSteps = positionalCarrierSteps({ wrapper, context: params.context });
@@ -484,6 +568,7 @@ function wrapperPayloadPlan(params: {
       kind: "shell-wrapper",
       wrapperSegment: wrapper.segment,
       wrapperArgv: wrapper.segment.argv,
+      wrapperPrefix: wrapperPrefixForStep(wrapper.step),
       inlineCommand: wrapperRisk.payload,
     };
     const groups = groupsFromSteps({
@@ -491,7 +576,9 @@ function wrapperPayloadPlan(params: {
       transport,
       risks: params.risks,
     });
-    return groups.length > 0 ? groups : null;
+    return groups.length > 0
+      ? applyWrapperPayloadPersistenceBoundary({ wrapper, groups })
+      : null;
   }
   if (!params.allowNestedPayload) {
     return null;
@@ -510,6 +597,7 @@ function wrapperPayloadPlan(params: {
     kind: "shell-wrapper",
     wrapperSegment: wrapper.segment,
     wrapperArgv: wrapper.segment.argv,
+    wrapperPrefix: wrapperPrefixForStep(wrapper.step),
     inlineCommand: wrapperRisk.payload,
   };
   const nestedStepsForWrapper = wrapper.step.id
@@ -524,7 +612,9 @@ function wrapperPayloadPlan(params: {
     transport,
     risks: params.risks,
   });
-  return groups.length > 0 ? groups : null;
+  return groups.length > 0
+    ? applyWrapperPayloadPersistenceBoundary({ wrapper, groups })
+    : null;
 }
 
 function dialectForArgv(argv: readonly string[]): ExecAuthorizationDialect {
@@ -569,11 +659,14 @@ function planFromExplanation(params: {
       segment: commandSegmentFromStep(step, params.context),
     }));
   const blockingRisk = hasBlockingRisk(params.explanation);
+  const unanalyzableRisk = findUnanalyzableRisk(params.explanation);
+  const topLevelStep = topLevelSteps[0]?.step;
   const canFallBackToExactWrapper =
     topLevelSteps.length === 1 &&
     Boolean(
-      topLevelSteps[0]?.step &&
-      shellWrapperRiskForStep(topLevelSteps[0].step, params.explanation.risks),
+      topLevelStep &&
+        shellWrapperRiskForStep(topLevelStep, params.explanation.risks) &&
+        (!unanalyzableRisk || riskInsideStep(unanalyzableRisk, topLevelStep)),
     );
   if (!params.explanation.ok || (blockingRisk && !canFallBackToExactWrapper)) {
     return unanalyzablePlan({
@@ -585,7 +678,11 @@ function planFromExplanation(params: {
 
   const payloadPlan = wrapperPayloadPlan({
     context: params.context,
-    allowNestedPayload: !blockingRisk,
+    allowNestedPayload:
+      !blockingRisk &&
+      !params.explanation.shapes.some((shape) =>
+        UNSUPPORTED_DIRECT_SHELL_TOPOLOGY_SHAPES.has(shape),
+      ),
     topLevelSteps,
     nestedSteps,
     operators: params.explanation.operators ?? [],
@@ -677,8 +774,9 @@ export async function planExecAuthorization(params: {
   }
 
   if (params.analysis.segments.length === 1) {
+    const wrapperSegment = params.analysis.segments[0];
     const inlineCommand = extractBindableShellWrapperInlineCommand(argv);
-    if (inlineCommand) {
+    if (inlineCommand && wrapperSegment && canUseWrapperShellInvocation(wrapperSegment)) {
       const shellPlan = await planShellAuthorization({
         command: inlineCommand,
         cwd: params.cwd,
@@ -686,11 +784,11 @@ export async function planExecAuthorization(params: {
         platform: params.platform,
       });
       if (shellPlan.ok) {
-        const wrapperSegment = params.analysis.segments[0];
         const nestedSegments = shellPlan.groups.flatMap((group) =>
           group.candidates.map((candidate) => candidate.sourceSegment),
         );
         if (wrapperSegment && canUseReusableWrapperPayloadCandidates(nestedSegments)) {
+          const persistNestedPayloads = !isUnresolvedPathScopedExecutable(wrapperSegment);
           const groups = shellPlan.groups.map((group) => ({
             ...group,
             candidates: group.candidates.map((candidate) => {
@@ -698,11 +796,13 @@ export async function planExecAuthorization(params: {
                 kind: "shell-wrapper",
                 wrapperSegment,
                 wrapperArgv: wrapperSegment.argv,
+                wrapperPrefix: "",
                 inlineCommand,
               };
               return {
                 ...candidate,
                 transport,
+                allowAlways: persistNestedPayloads ? candidate.allowAlways : false,
               };
             }),
           }));

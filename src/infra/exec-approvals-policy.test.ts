@@ -10,7 +10,7 @@ import {
   makeMockExecutableResolution,
 } from "./exec-approvals-test-helpers.js";
 import {
-  evaluateExecAllowlist,
+  evaluateExecAllowlistWithAuthorization as evaluateExecAllowlist,
   hasDurableExecApproval,
   maxAsk,
   minSecurity,

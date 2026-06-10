@@ -1387,6 +1387,85 @@ describe("exec approval handlers", () => {
     await requestPromise;
   });
 
+  it("stores requested exec approval decisions", async () => {
+    const { handlers, broadcasts, respond, context } = createExecApprovalFixture();
+
+    const requestPromise = requestExecApproval({
+      handlers,
+      respond,
+      context,
+      params: {
+        twoPhase: true,
+        host: "gateway",
+        command: "echo ok",
+        allowedDecisions: ["allow-once", "deny"],
+        systemRunPlan: undefined,
+        nodeId: undefined,
+      },
+    });
+
+    const requested = broadcasts.find((entry) => entry.event === "exec.approval.requested");
+    const id = (requested?.payload as { id?: string })?.id ?? "";
+    expect(id).not.toBe("");
+
+    const getRespond = vi.fn();
+    await getExecApproval({ handlers, id, respond: getRespond });
+
+    expect(mockCallArg(getRespond)).toBe(true);
+    const approval = mockCallArg(getRespond, 0, 1) as Record<string, unknown>;
+    expect(approval.allowedDecisions).toEqual(["allow-once", "deny"]);
+
+    const resolveRespond = vi.fn();
+    await resolveExecApproval({
+      handlers,
+      id,
+      respond: resolveRespond,
+      context,
+      decision: "deny",
+    });
+    await requestPromise;
+  });
+
+  it("does not let requested exec approval decisions broaden ask policy", async () => {
+    const { handlers, broadcasts, respond, context } = createExecApprovalFixture();
+
+    const requestPromise = requestExecApproval({
+      handlers,
+      respond,
+      context,
+      params: {
+        twoPhase: true,
+        host: "gateway",
+        command: "echo ok",
+        ask: "always",
+        allowedDecisions: ["allow-always"],
+        systemRunPlan: undefined,
+        nodeId: undefined,
+      },
+    });
+
+    const requested = broadcasts.find((entry) => entry.event === "exec.approval.requested");
+    const id = (requested?.payload as { id?: string })?.id ?? "";
+    expect(id).not.toBe("");
+
+    const getRespond = vi.fn();
+    await getExecApproval({ handlers, id, respond: getRespond });
+
+    expect(mockCallArg(getRespond)).toBe(true);
+    const approval = mockCallArg(getRespond, 0, 1) as Record<string, unknown>;
+    expect(approval.allowedDecisions).toEqual(["allow-once", "deny"]);
+
+    const resolveRespond = vi.fn();
+    await resolveExecApproval({
+      handlers,
+      id,
+      respond: resolveRespond,
+      context,
+      decision: "deny",
+    });
+    await requestPromise;
+  });
+
   it("attaches shared command analysis to gateway exec approval requests", async () => {
     const { handlers, broadcasts, respond, context } = createExecApprovalFixture();
 
@@ -1401,6 +1480,40 @@ describe("exec approval handlers", () => {
         commandArgv: ["python3", "script.py"],
         systemRunPlan: undefined,
         nodeId: undefined,
+      },
+    });
+
+    const requested = broadcasts.find((entry) => entry.event === "exec.approval.requested");
+    const request = requested?.payload as { id?: string; request?: { commandAnalysis?: unknown } };
+    const commandAnalysis = request.request?.commandAnalysis as Record<string, unknown>;
+    expect(commandAnalysis.commandCount).toBe(1);
+    expect(commandAnalysis.riskKinds).toEqual(["inline-eval"]);
+    expect(commandAnalysis.warningLines).toEqual(["Contains inline-eval: python3 -c"]);
+
+    const resolveRespond = vi.fn();
+    await resolveExecApproval({
+      handlers,
+      id: request.id ?? "",
+      respond: resolveRespond,
+      context,
+      decision: "deny",
+    });
+    await requestPromise;
+  });
+
+  it("attaches shared command analysis to node exec approval requests", async () => {
+    const { handlers, broadcasts, respond, context } = createExecApprovalFixture();
+
+    const requestPromise = requestExecApproval({
+      handlers,
+      respond,
+      context,
+      params: {
+        twoPhase: true,
+        host: "node",
+        nodeId: "node-1",
+        command: "python3 script.py",
+        commandArgv: ["python3", "-c", "print(1)"],
       },
     });
 
@@ -1892,7 +2005,7 @@ describe("exec approval handlers", () => {
     expect(request["warningText"]).not.toContain("\\u{A}");
   });
 
-  it("preserves command analysis and normalizes command spans", async () => {
+  it("normalizes command spans", async () => {
     const { handlers, broadcasts, respond, context } = createExecApprovalFixture({
       config: { tools: { exec: { commandHighlighting: true } } },
     });

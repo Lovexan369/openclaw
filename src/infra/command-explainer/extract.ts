@@ -9,6 +9,7 @@ import {
   SOURCE_EXECUTABLES,
 } from "../command-analysis/risks.js";
 import { normalizeExecutableToken } from "../exec-wrapper-resolution.js";
+import { inspectHostExecEnvOverrides } from "../host-env-security.js";
 import {
   extractShellWrapperCommand,
   extractShellWrapperInlineCommand,
@@ -31,6 +32,7 @@ import type {
 type MutableExplanation = {
   shapes: Set<CommandShape>;
   commands: CommandStep[];
+  operatorSources: OperatorSource[];
   risks: CommandRisk[];
   hasParseError: boolean;
   nextCommandIndex: number;
@@ -40,6 +42,12 @@ type DynamicArgument = {
   index: number;
   text: string;
   value: string;
+  span: SourceSpan;
+};
+
+type DangerousEnvAssignment = {
+  name: string;
+  text: string;
   span: SourceSpan;
 };
 
@@ -55,6 +63,7 @@ type CommandArgv = {
   argv: string[];
   arguments: CommandArgument[];
   dynamicArguments: DynamicArgument[];
+  dangerousEnvAssignments: DangerousEnvAssignment[];
 };
 
 type WalkState = {
@@ -82,6 +91,13 @@ type CommandTopologyBucket = {
   context: CommandContext;
   parentCommandId?: string;
   commands: CommandStep[];
+};
+
+type OperatorSource = {
+  context: CommandContext;
+  parentCommandId?: string;
+  source: string;
+  spanBase: SpanBase;
 };
 
 function children(node: TreeSitterNode): TreeSitterNode[] {
@@ -178,6 +194,25 @@ function spanFromSourceRange(source: string, startIndex: number, endIndex: numbe
   };
 }
 
+function spanFromSourceRangeWithBase(
+  source: string,
+  startIndex: number,
+  endIndex: number,
+  base: SpanBase,
+): SourceSpan {
+  if (base.mapOffset) {
+    const start = base.mapOffset(startIndex);
+    const end = base.mapOffset(endIndex);
+    return {
+      startIndex: start.index,
+      endIndex: end.index,
+      startPosition: start.position,
+      endPosition: end.position,
+    };
+  }
+  return translateSpan(spanFromSourceRange(source, startIndex, endIndex), base);
+}
+
 function utf8ByteLengthForCodePoint(codePoint: number): number {
   if (codePoint <= 0x7f) {
     return 1;
@@ -204,6 +239,29 @@ function utf8ByteLength(text: string): number {
     }
   }
   return length;
+}
+
+function spanFromNodeTextRange(
+  node: TreeSitterNode,
+  startIndex: number,
+  endIndex: number,
+  base: SpanBase,
+): SourceSpan {
+  const nodeSpan = spanFromNode(node, base);
+  if (base.mapOffset) {
+    const start = base.mapOffset(node.startIndex + utf8ByteLength(node.text.slice(0, startIndex)));
+    const end = base.mapOffset(node.startIndex + utf8ByteLength(node.text.slice(0, endIndex)));
+    return {
+      startIndex: start.index,
+      endIndex: end.index,
+      startPosition: start.position,
+      endPosition: end.position,
+    };
+  }
+  return translateSpan(spanFromSourceRange(node.text, startIndex, endIndex), {
+    startIndex: nodeSpan.startIndex,
+    startPosition: nodeSpan.startPosition,
+  });
 }
 
 function utf8ByteOffsetToStringIndex(text: string, byteOffset: number): number {
@@ -334,6 +392,32 @@ function argumentFromNode(
     value: value.value,
     span,
     decodedSourceOffsets,
+  };
+}
+
+function shellAssignmentName(text: string): string | null {
+  return text.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\+)?=/u)?.[1] ?? null;
+}
+
+function dangerousEnvAssignmentFromNode(
+  node: TreeSitterNode,
+  base: SpanBase,
+): DangerousEnvAssignment | null {
+  const name = shellAssignmentName(node.text);
+  if (!name) {
+    return null;
+  }
+  const diagnostics = inspectHostExecEnvOverrides({
+    overrides: { [name]: "1" },
+    blockPathOverrides: true,
+  });
+  if (diagnostics.rejectedOverrideBlockedKeys.length === 0) {
+    return null;
+  }
+  return {
+    name,
+    text: node.text,
+    span: spanFromNode(node, base),
   };
 }
 
@@ -647,11 +731,18 @@ function argvFromCommand(
   const argv = [executable.value];
   const argumentsList: CommandArgument[] = [];
   const dynamicArguments: DynamicArgument[] = [];
+  const dangerousEnvAssignments: DangerousEnvAssignment[] = [];
   for (const child of namedChildren(node)) {
+    if (child.type === "variable_assignment") {
+      const dangerousAssignment = dangerousEnvAssignmentFromNode(child, state.spanBase);
+      if (dangerousAssignment) {
+        dangerousEnvAssignments.push(dangerousAssignment);
+      }
+      continue;
+    }
     if (
       skipped.has(child) ||
       child.type === "command_name" ||
-      child.type === "variable_assignment" ||
       !COMMAND_ARGUMENT_NODE_TYPES.has(child.type)
     ) {
       continue;
@@ -669,11 +760,20 @@ function argvFromCommand(
     }
     argv.push(value.value);
   }
-  return { argv, arguments: argumentsList, dynamicArguments };
+  return { argv, arguments: argumentsList, dynamicArguments, dangerousEnvAssignments };
 }
 
 function firstShellToken(text: string): string {
   return text.trimStart().match(/^\S+/)?.[0] ?? "";
+}
+
+function declarationExecutableSpan(node: TreeSitterNode, base: SpanBase): SourceSpan {
+  const executable = firstShellToken(node.text);
+  const startIndex = node.text.search(/\S/u);
+  if (!executable || startIndex < 0) {
+    return spanFromNode(node, base);
+  }
+  return spanFromNodeTextRange(node, startIndex, startIndex + executable.length, base);
 }
 
 function argvFromDeclarationCommand(node: TreeSitterNode, state: WalkState): CommandArgv | null {
@@ -701,7 +801,7 @@ function argvFromDeclarationCommand(node: TreeSitterNode, state: WalkState): Com
     }
     argv.push(value.value);
   }
-  return { argv, arguments: argumentsList, dynamicArguments };
+  return { argv, arguments: argumentsList, dynamicArguments, dangerousEnvAssignments: [] };
 }
 
 function appendTestCommandArguments(
@@ -743,7 +843,7 @@ function argvFromTestCommand(node: TreeSitterNode, state: WalkState): CommandArg
   for (const child of namedChildren(node)) {
     appendTestCommandArguments(child, argv, argumentsList, dynamicArguments, state);
   }
-  return { argv, arguments: argumentsList, dynamicArguments };
+  return { argv, arguments: argumentsList, dynamicArguments, dangerousEnvAssignments: [] };
 }
 
 function isCommandLikeNode(node: TreeSitterNode): boolean {
@@ -949,6 +1049,30 @@ function recordDynamicArgumentRisks(
   }
 }
 
+function recordDangerousEnvAssignmentRisks(
+  assignments: DangerousEnvAssignment[],
+  output: MutableExplanation,
+): void {
+  for (const assignment of assignments) {
+    const exists = output.risks.some(
+      (risk) =>
+        risk.kind === "env-assignment" &&
+        risk.name === assignment.name &&
+        risk.span.startIndex === assignment.span.startIndex &&
+        risk.span.endIndex === assignment.span.endIndex,
+    );
+    if (exists) {
+      continue;
+    }
+    output.risks.push({
+      kind: "env-assignment",
+      name: assignment.name,
+      text: assignment.text,
+      span: assignment.span,
+    });
+  }
+}
+
 function recordCommandRisks(
   argv: string[],
   dynamicArguments: DynamicArgument[],
@@ -1073,6 +1197,12 @@ async function walk(
   } else if (node.type === "ERROR") {
     output.risks.push({ kind: "syntax-error", text: node.text, span });
   }
+  if (node.type === "variable_assignment") {
+    const dangerousAssignment = dangerousEnvAssignmentFromNode(node, state.spanBase);
+    if (dangerousAssignment) {
+      recordDangerousEnvAssignmentRisks([dangerousAssignment], output);
+    }
+  }
 
   if (
     node.type === "command" ||
@@ -1106,7 +1236,9 @@ async function walk(
         executableSpan:
           nameNode !== null
             ? spanFromNode(nameNode, state.spanBase)
-            : (parsed.arguments[0]?.span ?? span),
+            : node.type === "declaration_command"
+              ? declarationExecutableSpan(node, state.spanBase)
+              : (parsed.arguments[0]?.span ?? span),
       };
       if (state.parentCommandId) {
         step.parentCommandId = state.parentCommandId;
@@ -1114,6 +1246,7 @@ async function walk(
       if (step.executable) {
         output.nextCommandIndex += 1;
         output.commands.push(step);
+        recordDangerousEnvAssignmentRisks(parsed.dangerousEnvAssignments, output);
         recordCommandRisks(parsed.argv, parsed.dynamicArguments, node.text, span, output);
         const wrapperPayload = shellWrapperPayloadForParsing(
           parsed.argv,
@@ -1128,6 +1261,12 @@ async function walk(
             wrapperPayload.spanBase,
           );
           try {
+            output.operatorSources.push({
+              context: "wrapper-payload",
+              parentCommandId: commandId,
+              source: wrapperPayload.command,
+              spanBase: wrapperSpanBase,
+            });
             if (wrapperTree.rootNode.hasError) {
               output.hasParseError = true;
               output.risks.push({
@@ -1194,6 +1333,44 @@ function commandTopologyBuckets(commands: CommandStep[]): CommandTopologyBucket[
   return sortedBuckets;
 }
 
+type CommandSourceRange = {
+  startIndex: number;
+  endIndex: number;
+};
+
+function operatorSourceForBucket(
+  bucket: CommandTopologyBucket,
+  sources: readonly OperatorSource[],
+): OperatorSource | null {
+  return (
+    sources.find(
+      (source) =>
+        source.context === bucket.context && source.parentCommandId === bucket.parentCommandId,
+    ) ?? null
+  );
+}
+
+function commandSourceRanges(
+  source: string,
+  commands: readonly CommandStep[],
+): Map<string, CommandSourceRange> | null {
+  const ranges = new Map<string, CommandSourceRange>();
+  let cursor = 0;
+  for (const command of commands) {
+    if (!command.id) {
+      return null;
+    }
+    const startIndex = source.indexOf(command.text, cursor);
+    if (startIndex < 0) {
+      return null;
+    }
+    const endIndex = startIndex + command.text.length;
+    ranges.set(command.id, { startIndex, endIndex });
+    cursor = endIndex;
+  }
+  return ranges;
+}
+
 function topologyOperatorFromSeparator(
   separator: string,
 ): { kind: CommandOperatorKind; text: string; offset: number } | null {
@@ -1221,32 +1398,58 @@ function topologyOperatorFromSeparator(
   return best;
 }
 
-function resolveOperators(source: string, commands: CommandStep[]): CommandOperator[] {
+function resolveOperators(
+  source: string,
+  commands: CommandStep[],
+  operatorSources: readonly OperatorSource[],
+): CommandOperator[] {
   const operators: CommandOperator[] = [];
 
   for (const bucket of commandTopologyBuckets(commands)) {
+    const bucketOperatorSource = operatorSourceForBucket(bucket, operatorSources);
+    const bucketRanges = bucketOperatorSource
+      ? commandSourceRanges(bucketOperatorSource.source, bucket.commands)
+      : null;
     for (let index = 0; index < bucket.commands.length - 1; index += 1) {
       const fromCommand = bucket.commands[index];
       const toCommand = bucket.commands[index + 1];
       if (!fromCommand?.id || !toCommand?.id) {
         continue;
       }
-      const separatorStart = fromCommand.span.endIndex;
-      const separatorEnd = toCommand.span.startIndex;
+      let separatorSource = source;
+      let separatorStart = fromCommand.span.endIndex;
+      let separatorEnd = toCommand.span.startIndex;
+      let separatorBase: SpanBase | null = null;
+      const fromRange = bucketRanges?.get(fromCommand.id);
+      const toRange = bucketRanges?.get(toCommand.id);
+      if (bucketOperatorSource && fromRange && toRange) {
+        separatorSource = bucketOperatorSource.source;
+        separatorStart = fromRange.endIndex;
+        separatorEnd = toRange.startIndex;
+        separatorBase = bucketOperatorSource.spanBase;
+      }
       if (separatorEnd < separatorStart) {
         continue;
       }
-      const separator = source.slice(separatorStart, separatorEnd);
+      const separator = separatorSource.slice(separatorStart, separatorEnd);
       const operator = topologyOperatorFromSeparator(separator);
       if (!operator) {
         continue;
       }
       const startIndex = separatorStart + operator.offset;
+      const span = separatorBase
+        ? spanFromSourceRangeWithBase(
+            separatorSource,
+            startIndex,
+            startIndex + operator.text.length,
+            separatorBase,
+          )
+        : spanFromSourceRange(source, startIndex, startIndex + operator.text.length);
       const topologyOperator: CommandOperator = {
         id: `operator-${operators.length}`,
         kind: operator.kind,
         text: operator.text,
-        span: spanFromSourceRange(source, startIndex, startIndex + operator.text.length),
+        span,
         fromCommandId: fromCommand.id,
         toCommandId: toCommand.id,
       };
@@ -1270,13 +1473,14 @@ export async function explainShellCommand(source: string): Promise<CommandExplan
       risks: [],
       hasParseError: tree.rootNode.hasError,
       nextCommandIndex: 0,
+      operatorSources: [],
     };
     await walk(tree.rootNode, output, "top-level", {
       wrapperPayloadDepth: 0,
       spanBase,
     });
     const topLevelCommands = output.commands.filter((command) => command.context === "top-level");
-    const operators = resolveOperators(source, output.commands);
+    const operators = resolveOperators(source, output.commands, output.operatorSources);
     return {
       ok: !output.hasParseError,
       source,

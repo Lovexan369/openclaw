@@ -1103,11 +1103,29 @@ function shouldSkipExecScriptPreflight(params: {
   return params.host === "gateway" && params.security === "full" && params.ask === "off";
 }
 
-async function rejectUnsafeControlShellCommand(command: string): Promise<void> {
-  const decision = await inspectControlShellCommand({ command });
+async function resolveControlShellApprovalWarning(params: {
+  command: string;
+  host: ExecHost;
+  security: ExecSecurity;
+  ask: ExecAsk;
+}): Promise<string | undefined> {
+  const decision = await inspectControlShellCommand({ command: params.command });
   if (decision.kind === "deny") {
     throw new Error(decision.message);
   }
+  if (
+    decision.kind !== "requires-approval" ||
+    (params.security === "full" && params.ask === "off")
+  ) {
+    return undefined;
+  }
+  if (params.host === "node") {
+    return decision.warning;
+  }
+  if (params.host !== "gateway") {
+    throw new Error(decision.warning);
+  }
+  return undefined;
 }
 
 export function createExecTool(
@@ -1339,7 +1357,18 @@ export function createExecTool(
         const rawWorkdir = explicitWorkdir ?? defaultWorkdir ?? process.cwd();
         workdir = resolveWorkdir(rawWorkdir, warnings);
       }
-      await rejectUnsafeControlShellCommand(params.command);
+      const controlShellApprovalWarning =
+        host === "node"
+          ? undefined
+          : await resolveControlShellApprovalWarning({
+              command: params.command,
+              host,
+              security,
+              ask,
+            });
+      if (controlShellApprovalWarning) {
+        warnings.push(controlShellApprovalWarning);
+      }
 
       const inheritedBaseEnv = coerceEnv(process.env);
       const hostEnvResult =

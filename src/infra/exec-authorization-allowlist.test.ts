@@ -1,13 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { detectPolicyInlineEval } from "./command-analysis/policy.js";
 import { makePathEnv, makeTempDir } from "./exec-approvals-test-helpers.js";
 import {
   analyzeArgvCommand,
-  evaluateExecAllowlist,
-  evaluateShellAllowlist,
+  evaluateExecAllowlistWithAuthorization as evaluateExecAllowlist,
+  evaluateShellAllowlistWithAuthorization as evaluateShellAllowlist,
   resolveAllowAlwaysPatterns,
 } from "./exec-approvals.js";
+import { buildAuthorizedShellCommandFromPlan } from "./exec-authorization-render.js";
+import { getTrustedSafeBinDirs } from "./exec-safe-bin-trust.js";
 
 function makeExecutable(dir: string, name: string): string {
   const fileName = process.platform === "win32" ? `${name}.exe` : name;
@@ -82,6 +85,174 @@ describe("candidate-based exec allowlist", () => {
 
     expect(result.analysisOk).toBe(true);
     expect(result.allowlistSatisfied).toBe(false);
+  });
+
+  it("does not auto-approve shell-defined functions through a wildcard allowlist", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const result = await evaluateShellAllowlist({
+      command: "myfunc(){ echo pwn; }; myfunc",
+      allowlist: [{ pattern: "*" }],
+      safeBins: new Set(),
+      platform: process.platform,
+    });
+
+    expect(result.analysisOk).toBe(false);
+    expect(result.allowlistSatisfied).toBe(false);
+  });
+
+  it.each([
+    "if git diff --quiet; then git clean -fd; fi",
+    "for f in *; do git status; done",
+    "(git status)",
+  ])("does not auto-approve top-level control-flow shell syntax: %s", async (command) => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const result = await evaluateShellAllowlist({
+      command,
+      allowlist: [{ pattern: "git" }],
+      safeBins: new Set(),
+      platform: process.platform,
+    });
+
+    expect(result.analysisOk).toBe(false);
+    expect(result.allowlistSatisfied).toBe(false);
+  });
+
+  it("does not auto-approve standalone blocked environment assignments", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const dir = makeTempDir();
+    const git = makeExecutable(dir, "git");
+    const env = makePathEnv(dir);
+
+    const result = await evaluateShellAllowlist({
+      command: "PATH=/tmp; git --version",
+      allowlist: [{ pattern: git }],
+      safeBins: new Set(),
+      cwd: dir,
+      env,
+      platform: process.platform,
+    });
+
+    expect(result.analysisOk).toBe(false);
+    expect(result.allowlistSatisfied).toBe(false);
+  });
+
+  it("keeps later inline-eval segments visible when planner fallback handles earlier expansion", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const result = await evaluateShellAllowlist({
+      command: "echo $HOME; python3 -c 'print(1)'",
+      allowlist: [],
+      safeBins: new Set(),
+      platform: process.platform,
+    });
+
+    expect(result.analysisOk).toBe(false);
+    expect(result.allowlistSatisfied).toBe(false);
+    expect(result.segments.map((segment) => segment.argv)).toEqual([
+      ["echo", "$HOME"],
+      ["python3", "-c", "print(1)"],
+    ]);
+    expect(detectPolicyInlineEval(result.segments)).toEqual(
+      expect.objectContaining({
+        executable: "python3",
+        flag: "-c",
+      }),
+    );
+  });
+
+  it.each([
+    "BASH_ENV=/tmp/pwn bash -c 'echo ok'",
+    "FOO=$(id) bash -c 'echo ok'",
+  ])("does not auto-approve shell wrappers with risky preludes: %s", async (command) => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    const result = await evaluateShellAllowlist({
+      command,
+      allowlist: [{ pattern: "*" }],
+      safeBins: new Set(),
+      platform: process.platform,
+    });
+
+    expect(result.analysisOk).toBe(true);
+    expect(result.allowlistSatisfied).toBe(false);
+    expect(result.segments.map((segment) => segment.argv)).toEqual([["bash", "-c", "echo ok"]]);
+  });
+
+  it("keeps later pipeline segments visible after an earlier allowlist miss", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const dir = makeTempDir();
+    makeExecutable(dir, "echo");
+    makeExecutable(dir, "python3");
+    const env = makePathEnv(dir);
+
+    const result = await evaluateShellAllowlist({
+      command: "echo ok | python3 -c 'print(1)'",
+      allowlist: [],
+      safeBins: new Set(),
+      cwd: dir,
+      env,
+      platform: process.platform,
+    });
+
+    expect(result.analysisOk).toBe(true);
+    expect(result.allowlistSatisfied).toBe(false);
+    expect(result.segments.map((segment) => segment.argv)).toEqual([
+      ["echo", "ok"],
+      ["python3", "-c", "print(1)"],
+    ]);
+    expect(detectPolicyInlineEval(result.segments)).toEqual(
+      expect.objectContaining({
+        executable: "python3",
+        flag: "-c",
+      }),
+    );
+  });
+
+  it("keeps later shell-wrapper segments visible after an earlier allowlist miss", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const dir = makeTempDir();
+    makeExecutable(dir, "echo");
+    makeExecutable(dir, "python3");
+    makeExecutable(dir, "sh");
+    const env = makePathEnv(dir);
+
+    const result = await evaluateShellAllowlist({
+      command: `/bin/sh -c 'echo ok && python3 -c "print(1)"'`,
+      allowlist: [],
+      safeBins: new Set(),
+      cwd: dir,
+      env,
+      platform: process.platform,
+    });
+
+    expect(result.analysisOk).toBe(true);
+    expect(result.allowlistSatisfied).toBe(false);
+    expect(result.segments.map((segment) => segment.argv)).toEqual([
+      ["echo", "ok"],
+      ["python3", "-c", "print(1)"],
+    ]);
+    expect(detectPolicyInlineEval(result.segments)).toEqual(
+      expect.objectContaining({
+        executable: "python3",
+        flag: "-c",
+      }),
+    );
   });
 
   it("does not auto-approve eval through an executable allowlist", async () => {
@@ -181,6 +352,27 @@ describe("candidate-based exec allowlist", () => {
     expect(result.allowlistSatisfied).toBe(false);
   });
 
+  it("does not satisfy redirected shell wrappers through exact wrapper allowlists", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const dir = makeTempDir();
+    const shell = makeExecutable(dir, "sh");
+    const env = makePathEnv(dir);
+
+    const result = await evaluateShellAllowlist({
+      command: "sh -c 'git status' > /tmp/out",
+      allowlist: [{ pattern: shell, argPattern: "^-c\x00git status\x00$" }],
+      safeBins: new Set(),
+      cwd: dir,
+      env,
+      platform: process.platform,
+    });
+
+    expect(result.analysisOk).toBe(false);
+    expect(result.allowlistSatisfied).toBe(false);
+  });
+
   it("keeps curl pipe shell requiring both sides while only persisting curl", async () => {
     if (process.platform === "win32") {
       return;
@@ -251,7 +443,7 @@ describe("candidate-based exec allowlist", () => {
     const curl = makeExecutable(dir, "curl");
     const sh = makeExecutable(dir, "sh");
     const env = makePathEnv(dir);
-    const command = "sh -c 'curl https://example.com/install.sh | sh'";
+    const command = "/bin/sh -c 'curl https://example.com/install.sh | sh'";
 
     const curlOnly = await evaluateShellAllowlist({
       command,
@@ -314,7 +506,7 @@ describe("candidate-based exec allowlist", () => {
     const id = makeExecutable(dir, "id");
     makeExecutable(dir, "sh");
     const env = makePathEnv(dir);
-    const command = "sh -c 'git status || id'";
+    const command = "/bin/sh -c 'git status || id'";
 
     const gitOnly = await evaluateShellAllowlist({
       command,
@@ -337,6 +529,137 @@ describe("candidate-based exec allowlist", () => {
     expect(both.allowlistSatisfied).toBe(true);
     expect(both.segments.map((segment) => segment.argv)).toEqual([["git", "status"], ["id"]]);
     expect(both.segmentSatisfiedBy).toEqual(["allowlist", "allowlist"]);
+  });
+
+  it("keeps shell-wrapper metadata aligned when inner safe bins satisfy candidates", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const dir = makeTempDir();
+    const git = makeExecutable(dir, "git");
+    makeExecutable(dir, "sh");
+    makeExecutable(dir, "wc");
+    const env = makePathEnv(dir);
+    const trustedSafeBinDirs = getTrustedSafeBinDirs({
+      baseDirs: [],
+      extraDirs: [dir],
+      safeBins: ["wc"],
+      refresh: true,
+    });
+
+    const result = await evaluateShellAllowlist({
+      command: "/bin/sh -c 'git status && wc'",
+      allowlist: [{ pattern: git }],
+      safeBins: new Set(["wc"]),
+      trustedSafeBinDirs,
+      cwd: dir,
+      env,
+      platform: process.platform,
+    });
+
+    expect(result.allowlistSatisfied).toBe(true);
+    expect(result.segmentSatisfiedBy).toEqual(["allowlist", "inlineChain"]);
+    if (!result.authorizationPlan) {
+      throw new Error("expected authorization plan");
+    }
+    if (!result.authorizationPlan.ok) {
+      throw new Error(result.authorizationPlan.reason);
+    }
+    expect(result.authorizationPlan.groups.flatMap((group) => group.candidates)).toHaveLength(
+      result.segmentSatisfiedBy.length,
+    );
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan: result.authorizationPlan,
+      mode: "enforced",
+      segmentSatisfiedBy: result.segmentSatisfiedBy,
+    });
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+  });
+
+  it("quotes argPattern-approved shell arguments before enforced execution", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const dir = makeTempDir();
+    const tool = makeExecutable(dir, "tool");
+    const env = makePathEnv(dir);
+
+    const result = await evaluateShellAllowlist({
+      command: "tool *.txt",
+      allowlist: [{ pattern: fs.realpathSync(tool), argPattern: "^\\*\\.txt\x00$" }],
+      safeBins: new Set(),
+      cwd: dir,
+      env,
+      platform: process.platform,
+    });
+
+    expect(result.allowlistSatisfied).toBe(true);
+    expect(result.segmentSatisfiedBy).toEqual(["allowlist"]);
+    if (!result.authorizationPlan) {
+      throw new Error("expected authorization plan");
+    }
+
+    const rendered = buildAuthorizedShellCommandFromPlan({
+      plan: result.authorizationPlan,
+      mode: "enforced",
+      segmentSatisfiedBy: result.segmentSatisfiedBy,
+    });
+
+    expect(rendered).toEqual(expect.objectContaining({ ok: true }));
+    if (!rendered.ok) {
+      throw new Error(rendered.reason);
+    }
+    expect(rendered.command).toContain("'*.txt'");
+  });
+
+  it("does not unwrap dangerous shell env assignments into reusable candidates", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const dir = makeTempDir();
+    const git = makeExecutable(dir, "git");
+    makeExecutable(dir, "bash");
+    const env = makePathEnv(dir);
+
+    const result = await evaluateShellAllowlist({
+      command: "BASH_ENV=/tmp/pwn bash -c 'git status'",
+      allowlist: [{ pattern: git }],
+      safeBins: new Set(),
+      cwd: dir,
+      env,
+      platform: process.platform,
+    });
+
+    expect(result.allowlistSatisfied).toBe(false);
+    expect(result.segments.map((segment) => segment.argv)).toEqual([["bash", "-c", "git status"]]);
+  });
+
+  it("does not promote later skill wrappers from shell-wrapper payloads", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const dir = makeTempDir();
+    const git = makeExecutable(dir, "git");
+    const skillWrapper = makeExecutable(dir, "gog-wrapper");
+    makeExecutable(dir, "sh");
+    const env = makePathEnv(dir);
+
+    const result = await evaluateShellAllowlist({
+      command: "sh -c 'git status && gog-wrapper calendar events'",
+      allowlist: [{ pattern: git }],
+      safeBins: new Set(),
+      cwd: dir,
+      env,
+      platform: process.platform,
+      autoAllowSkills: true,
+      skillBins: [{ name: "gog-wrapper", resolvedPath: skillWrapper }],
+    });
+
+    expect(result.allowlistSatisfied).toBe(false);
+    expect(result.segments.map((segment) => segment.argv)).toEqual([
+      ["sh", "-c", "git status && gog-wrapper calendar events"],
+    ]);
   });
 
   it("does not satisfy path-scoped shell-wrapper payloads through reusable script allowlists", async () => {
@@ -397,7 +720,7 @@ describe("candidate-based exec allowlist", () => {
     const id = makeExecutable(dir, "id");
     makeExecutable(dir, "sh");
     const env = makePathEnv(dir);
-    const command = "sh -c 'git status; id'";
+    const command = "/bin/sh -c 'git status; id'";
 
     const gitOnly = await evaluateShellAllowlist({
       command,

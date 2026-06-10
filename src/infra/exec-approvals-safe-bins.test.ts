@@ -8,8 +8,8 @@ import {
   makeTempDir,
 } from "./exec-approvals-test-helpers.js";
 import {
-  evaluateExecAllowlist,
-  evaluateShellAllowlist,
+  evaluateExecAllowlistWithAuthorization as evaluateExecAllowlist,
+  evaluateShellAllowlistWithAuthorization as evaluateShellAllowlist,
   isSafeBinUsage,
   normalizeSafeBins,
   resolveSafeBins,

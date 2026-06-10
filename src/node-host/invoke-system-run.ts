@@ -7,10 +7,10 @@ import {
 } from "../infra/command-analysis/inline-eval.js";
 import { detectPolicyInlineEval } from "../infra/command-analysis/policy.js";
 import {
-  addDurableCommandApproval,
   hasDurableExecApproval,
-  persistAllowAlwaysPatterns,
+  persistAllowAlwaysDecision,
   recordAllowlistMatchesUse,
+  resolveAllowAlwaysPersistenceDecision,
   resolveApprovalAuditTrustPath,
   resolveExecApprovals,
   type ExecAllowlistEntry,
@@ -121,6 +121,7 @@ type SystemRunPolicyPhase = SystemRunParsePhase & {
   segments: ExecCommandSegment[];
   authorizationPlan?: import("../infra/exec-approvals.js").ExecAuthorizationPlan;
   segmentSatisfiedBy: ExecSegmentSatisfiedBy[];
+  segmentAllowlistEntries: Array<ExecAllowlistEntry | null>;
   plannedAllowlistArgv: string[] | undefined;
   isWindows: boolean;
   approvedCwdSnapshot: ApprovedCwdSnapshot | undefined;
@@ -540,6 +541,7 @@ async function evaluateSystemRunPolicyPhase(
     segments,
     authorizationPlan,
     segmentSatisfiedBy,
+    segmentAllowlistEntries,
     plannedAllowlistArgv: plannedAllowlistArgv ?? undefined,
     isWindows,
     approvedCwdSnapshot,
@@ -609,6 +611,7 @@ async function executeSystemRunPhase(
     shellCommand: phase.shellPayload,
     segments: phase.segments,
     segmentSatisfiedBy: phase.segmentSatisfiedBy,
+    segmentAllowlistEntries: phase.segmentAllowlistEntries,
     authorizationPlan: phase.authorizationPlan,
     cwd: phase.cwd,
     env: phase.env,
@@ -661,22 +664,24 @@ async function executeSystemRunPhase(
     }
   }
 
-  if (phase.policy.approvalDecision === "allow-always" && phase.inlineEvalHit === null) {
-    const patterns = phase.policy.analysisOk
-      ? persistAllowAlwaysPatterns({
-          approvals: phase.approvals.file,
-          agentId: phase.agentId,
-          segments: phase.segments,
-          authorizationPlan: phase.authorizationPlan,
-          cwd: phase.cwd,
-          env: phase.env,
-          platform: process.platform,
-          strictInlineEval: phase.strictInlineEval,
-        })
-      : [];
-    if (patterns.length === 0) {
-      addDurableCommandApproval(phase.approvals.file, phase.agentId, phase.commandText);
-    }
+  if (phase.policy.approvalDecision === "allow-always") {
+    const decision = resolveAllowAlwaysPersistenceDecision({
+      commandText: phase.commandText,
+      analysisOk: phase.policy.analysisOk,
+      explicitApprovalOnly: phase.inlineEvalHit !== null,
+      mutableFileOperand: phase.approvalPlan?.mutableFileOperand,
+      segments: phase.segments,
+      authorizationPlan: phase.authorizationPlan,
+      cwd: phase.cwd,
+      env: phase.env,
+      platform: process.platform,
+      strictInlineEval: phase.strictInlineEval,
+    });
+    persistAllowAlwaysDecision({
+      approvals: phase.approvals.file,
+      agentId: phase.agentId,
+      decision,
+    });
   }
 
   recordAllowlistMatchesUse({
