@@ -384,10 +384,20 @@ export function normalizeGeneratedTypeScript(text: string): string {
     .replaceAll("| null | null", "| null");
 }
 
+// Sort typed schema unions deterministically while preserving order-sensitive arrays
+// such as prefixItems, required, and enum.
+const typeSortedSchemaUnionArrayKey = "oneOf";
+
 export function canonicalizeCodexAppServerProtocolJson(value: unknown): unknown {
+  return canonicalizeCodexAppServerProtocolJsonValue(value);
+}
+
+function canonicalizeCodexAppServerProtocolJsonValue(value: unknown, parentKey?: string): unknown {
   if (Array.isArray(value)) {
-    const items = value.map(canonicalizeCodexAppServerProtocolJson);
-    return sortCodexProtocolJsonArrayByType(items);
+    const items = value.map((item) => canonicalizeCodexAppServerProtocolJsonValue(item));
+    return parentKey === typeSortedSchemaUnionArrayKey
+      ? sortCodexProtocolJsonArrayByType(items)
+      : items;
   }
 
   if (!isPlainObject(value)) {
@@ -396,7 +406,7 @@ export function canonicalizeCodexAppServerProtocolJson(value: unknown): unknown 
 
   const sorted: Record<string, unknown> = {};
   const entries = Object.entries(value)
-    .map(([key, child]) => [key, canonicalizeCodexAppServerProtocolJson(child)] as const)
+    .map(([key, child]) => [key, canonicalizeCodexAppServerProtocolJsonValue(child, key)] as const)
     .toSorted(([left], [right]) => {
       if (left < right) {
         return -1;

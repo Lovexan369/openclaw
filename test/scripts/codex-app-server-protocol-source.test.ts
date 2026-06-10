@@ -206,14 +206,23 @@ describe("Codex app-server protocol JSON canonicalizer", () => {
 `);
   });
 
-  it("sorts arrays only when plain object items expose top-level type values", () => {
+  it("sorts typed-object arrays only for oneOf schema unions", () => {
     expect(
       canonicalizeCodexAppServerProtocolJson({
+        anyOf: [
+          { type: "string", z: 1 },
+          { type: "integer", z: 2 },
+        ],
         enum: ["z", "a"],
         mixed: [{ type: "b" }, "item", { type: "a" }],
         oneOf: [
-          { title: "Second", z: true },
-          { a: true, title: "First" },
+          { type: "object", z: true },
+          { a: true, type: "array" },
+          { type: "object", z: false },
+        ],
+        prefixItems: [
+          { z: 1, type: "string" },
+          { type: "number", a: 2 },
         ],
         required: ["z", "a"],
         typed: [
@@ -223,16 +232,25 @@ describe("Codex app-server protocol JSON canonicalizer", () => {
         ],
       }),
     ).toEqual({
+      anyOf: [
+        { type: "string", z: 1 },
+        { type: "integer", z: 2 },
+      ],
       enum: ["z", "a"],
       mixed: [{ type: "b" }, "item", { type: "a" }],
       oneOf: [
-        { title: "Second", z: true },
-        { a: true, title: "First" },
+        { a: true, type: "array" },
+        { type: "object", z: true },
+        { type: "object", z: false },
+      ],
+      prefixItems: [
+        { type: "string", z: 1 },
+        { a: 2, type: "number" },
       ],
       required: ["z", "a"],
       typed: [
-        { type: "alpha", z: 2 },
         { type: "beta", z: 1 },
+        { type: "alpha", z: 2 },
         { type: "beta", z: 3 },
       ],
     });
