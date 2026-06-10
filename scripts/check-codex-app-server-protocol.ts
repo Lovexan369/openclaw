@@ -80,6 +80,7 @@ async function main(): Promise<void> {
 
   try {
     await compareGeneratedProtocolMirror(source.jsonRoot);
+    await compareGeneratedTypeScriptMirror(source.typescriptRoot);
 
     for (const check of checks) {
       const filePath = path.join(source.typescriptRoot, check.file);
@@ -114,6 +115,45 @@ async function main(): Promise<void> {
   console.log(
     `Codex app-server generated protocol matches OpenClaw bridge assumptions: ${source.codexRepo}`,
   );
+}
+
+async function compareGeneratedTypeScriptMirror(sourceRoot: string): Promise<void> {
+  const targetRoot = path.join(generatedRoot, "typescript");
+  const sourceFiles = await listRelativeFiles(sourceRoot);
+  const targetFiles = await listRelativeFiles(targetRoot).catch((error: unknown) => {
+    failures.push(`protocol-generated/typescript: missing local mirror (${String(error)})`);
+    return [];
+  });
+  const sourceFileSet = new Set(sourceFiles);
+  const targetFileSet = new Set(targetFiles);
+
+  for (const file of sourceFiles) {
+    if (!targetFileSet.has(file)) {
+      failures.push(`protocol-generated/typescript/${file}: missing local generated type`);
+      continue;
+    }
+    const [source, target] = await Promise.all([
+      fs.readFile(path.join(sourceRoot, file), "utf8"),
+      fs.readFile(path.join(targetRoot, file), "utf8"),
+    ]);
+    if (source !== target) {
+      failures.push(`protocol-generated/typescript/${file}: differs from generated source`);
+    }
+  }
+
+  for (const file of targetFiles) {
+    if (!sourceFileSet.has(file)) {
+      failures.push(`protocol-generated/typescript/${file}: stale local generated type`);
+    }
+  }
+}
+
+async function listRelativeFiles(root: string): Promise<string[]> {
+  const entries = await fs.readdir(root, { recursive: true, withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.relative(root, path.join(entry.parentPath, entry.name)))
+    .toSorted();
 }
 
 async function compareGeneratedProtocolMirror(sourceJsonRoot: string): Promise<void> {

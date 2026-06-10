@@ -211,6 +211,7 @@
     "extensions/diffs/assets/viewer-runtime.js",
     "extensions/diffs-language-pack/assets/viewer-runtime.js",
     "extensions/canvas/src/host/a2ui/a2ui.bundle.js",
+    "extensions/codex/src/app-server/protocol-generated/typescript/**",
     "node_modules/",
     "patches/",
     "pnpm-lock.yaml",

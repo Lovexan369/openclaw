@@ -22,6 +22,7 @@ async function main(): Promise<void> {
   try {
     await fs.rm(targetRoot, { recursive: true, force: true });
     await fs.mkdir(targetRoot, { recursive: true });
+    await fs.cp(source.typescriptRoot, path.join(targetRoot, "typescript"), { recursive: true });
 
     for (const schema of selectedCodexAppServerJsonSchemas) {
       await fs.mkdir(path.dirname(path.join(targetRoot, "json", schema)), { recursive: true });
